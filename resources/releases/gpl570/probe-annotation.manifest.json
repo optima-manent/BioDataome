@@ -1,0 +1,14 @@
+{
+  "schema": "gpl570-probe-annotation-v1",
+  "platform": "GPL570",
+  "feature_count": 54675,
+  "mapped_probe_count": 44647,
+  "mapping_row_count": 57147,
+  "keytype": "PROBEID",
+  "columns": ["ENTREZID", "SYMBOL", "GENENAME"],
+  "r_version": "R version 4.6.1 (2026-06-24 ucrt)",
+  "bioconductor_version": "3.23",
+  "annotation_package": "hgu133plus2.db",
+  "annotation_package_version": "3.13.0",
+  "annotation_db_schema": "HUMANCHIP_DB"
+}

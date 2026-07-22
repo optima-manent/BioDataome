@@ -1,0 +1,40 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software library or the underlying c-SKL methodology, please
+  cite the methodology article below.
+title: C-SKL Atlas
+type: software
+authors:
+  - name: BioDataome contributors
+repository-code: https://github.com/optima-manent/BioDataome
+url: https://optima-manent.github.io/BioDataome/
+version: 0.4.0
+date-released: 2026-07-22
+license: MIT
+keywords:
+  - bioinformatics
+  - transcriptomics
+  - dataset similarity
+  - c-SKL
+  - knowledge discovery
+preferred-citation:
+  type: article
+  authors:
+    - family-names: Lakiotaki
+      given-names: Kleanthi
+    - family-names: Georgakopoulos
+      given-names: George
+    - family-names: Castanas
+      given-names: Elias
+    - family-names: Røe
+      given-names: Oluf Dimitri
+    - family-names: Borboudakis
+      given-names: Giorgos
+    - family-names: Tsamardinos
+      given-names: Ioannis
+  title: A data driven approach reveals disease similarity on a molecular level
+  journal: npj Systems Biology and Applications
+  year: 2019
+  volume: 5
+  start: 39
+  doi: 10.1038/s41540-019-0117-0

@@ -1,0 +1,43 @@
+# Local-only notes and recovery material
+/.private/
+
+# Python
+/.venv/
+/.pytest_cache/
+/.ruff_cache/
+/.coverage
+/htmlcov/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+
+# JavaScript and web builds
+/node_modules/
+/.next/
+/.vinext/
+/.wrangler/
+/dist/
+/out/
+*.tsbuildinfo
+
+# Runtime data and generated scientific artifacts
+/var/
+/artifacts/
+/outputs/
+/work/
+/build/lib/
+/app/data/releases/
+
+# Package-manager and debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Local environment and credentials
+.env*
+!.env.example
+*.pem
+
+# Editor and operating-system files
+.DS_Store

@@ -1,0 +1,3 @@
+* text=auto eol=lf
+*.png binary
+python/cskl_pipeline/** whitespace=-blank-at-eof

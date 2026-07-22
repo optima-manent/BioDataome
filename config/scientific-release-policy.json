@@ -1,0 +1,48 @@
+{
+  "schema": "cskl-atlas-release-policy-v1",
+  "status": "operational-release",
+  "stratum": "GPL570:global",
+  "organism": "Homo sapiens",
+  "cskl": {
+    "alpha": 0.5,
+    "feature_count": 54675,
+    "feature_hash": "67be807907cf50f9eafd6a7852d1f237440c1535",
+    "operational_bootstraps": 100,
+    "manuscript_bootstraps": 500,
+    "manuscript_exact_sample_sizes": true
+  },
+  "multiple_testing": {
+    "primary_q": 0.05,
+    "exploratory_q": 0.1,
+    "global_family": "all valid dataset pairs",
+    "independent_family": "pairs with zero literal shared samples"
+  },
+  "sample_overlap": {
+    "retain_all_pairs": true,
+    "major_overlap_coefficient": 0.5,
+    "exact_and_major_edge_style": "dotted",
+    "minor_edge_style": "solid-with-warning",
+    "independent_claim_requires_shared_count": 0
+  },
+  "graph": {
+    "q_max": 0.05,
+    "top_k_per_node": 25,
+    "top_k_policy": "union",
+    "community_algorithm": "Leiden modularity",
+    "resolution": 0.5,
+    "seed": 1729,
+    "stability_runs": 10
+  },
+  "text": {
+    "method": "SPECTER2 proximity adapter",
+    "input_contract": "GEO title [SEP] summary fallback",
+    "interpretation": "text proximity, not molecular validation"
+  },
+  "pathways": {
+    "source": "Reactome",
+    "release": "97",
+    "background": "unique Entrez genes in frozen GPL570 annotation",
+    "test": "one-sided hypergeometric over-representation",
+    "correction": "Benjamini-Hochberg over all size-eligible pathways"
+  }
+}

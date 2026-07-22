@@ -1,0 +1,16 @@
+{
+  "schema": "cskl-core-provenance-v1",
+  "captured_at": "2026-07-22T00:00:00Z",
+  "method_reference": "https://doi.org/10.1038/s41540-019-0117-0",
+  "scientific_kernel": {
+    "path": "python/cskl.py",
+    "sha256": "e1bd2758d7fde8a32d8436c9a4b218ee9a24aa808fac8f7cbf125d695f92fb32",
+    "role": "Standalone numerical source of truth for signatures, c-SKL, calibration helpers, and feature explanations."
+  },
+  "validated_fast_path": {
+    "path": "python/cskl_pipeline/scale/fastcore.py",
+    "sha256": "9ff1963d0c5cca3354f3abdfdc9a76dfdab2e97aee7e005450e509b310868255",
+    "role": "Scalable implementation guarded by numerical-faithfulness tests against the scientific kernel."
+  },
+  "policy": "Production orchestration binds every reuse decision to dependency fingerprints; changes to either numerical implementation require regression evidence and a new provenance record."
+}

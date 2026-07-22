@@ -1,0 +1,34 @@
+{
+  "annotation_assertion_count": 3759,
+  "annotation_extractors": [
+    "geo-ontology-annotation-v4",
+    "geo-taxonomy-v1"
+  ],
+  "artifact": "atlas-graph.json",
+  "boundary_clamped_pair_count": 3472,
+  "calibration_mode": "frozen",
+  "computed_explanation_count": 4,
+  "content_addressed_filename": "atlas-graph-cfa4361e00c91eb61fd1f34665e13afafa406249fa626db233783fd5e86de804.json",
+  "dependency_hash": "330c636b11dde407ae7f6b0e677c6eb230ba15f61bbd104fd40c08369e05d753",
+  "display_facet_version": "atlas-tissue-system-v1",
+  "edge_count": 5344,
+  "geo_metadata_count": 500,
+  "layout_quality": {
+    "algorithm": "igraph-fr-collision-v2",
+    "aspect_ratio": 1.5,
+    "iterations": 600,
+    "observed_minimum_separation": 0.039251227351976316,
+    "severe_collision_pair_count": 0,
+    "target_minimum_separation": 0.044721359549995794
+  },
+  "layout_version": "igraph-1.0.0:fr-collision-v2:1c669b96524076c8",
+  "node_count": 500,
+  "null_bootstrap_count": 100,
+  "ontology_audit_hash": "854acdf5f85fddb33bda5ce1f2f3aca81e89686a862e82e678540d2dbc765215",
+  "ontology_paper_gate": "fail",
+  "output_checksum": "cfa4361e00c91eb61fd1f34665e13afafa406249fa626db233783fd5e86de804",
+  "published_annotation_assertion_count": 3759,
+  "schema": "cskl-atlas-static-graph-v3",
+  "snapshot_id": "snapshot_ee201ff2e0991ea8fdb7bcad",
+  "snapshot_manifest_checksum": "2856b6a6665a2a84e353de534a43a0d4619da8aa0f15d349e61f7d88192da032"
+}
