@@ -22,8 +22,11 @@ function PrimerGraphic() {
     <div className="showcase-primer" aria-hidden="true">
       <span className="showcase-cluster-label showcase-cluster-a">Blood studies</span>
       <span className="showcase-cluster-label showcase-cluster-b">Neural studies</span>
-      <span className="showcase-link showcase-link-a" />
-      <span className="showcase-link showcase-link-b" />
+      <svg className="showcase-links" viewBox="0 0 100 100" preserveAspectRatio="none">
+        <path className="showcase-link showcase-link-a" d="M23 51 C27 58 31 66 35 71" />
+        <path className="showcase-link showcase-link-b" d="M79 45 C83 52 86 61 88 69" />
+        <path className="showcase-link showcase-link-c" d="M35 71 C49 59 64 48 79 45" />
+      </svg>
       <span className="showcase-dot showcase-dot-a" />
       <span className="showcase-dot showcase-dot-b" />
       <span className="showcase-dot showcase-dot-c" />

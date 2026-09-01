@@ -86,28 +86,33 @@
   right: 9%;
 }
 
-.showcase-link {
+.showcase-links {
   position: absolute;
+  inset: 0;
   z-index: 1;
-  height: 1px;
-  background: linear-gradient(90deg, rgb(123 229 196 / 18%), rgb(159 176 197 / 72%));
-  transform-origin: left center;
-  animation: showcase-link-in 1.1s ease both;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
 }
 
-.showcase-link-a {
-  top: 54%;
-  left: 28%;
-  width: 46%;
-  transform: rotate(-8deg);
+.showcase-link {
+  fill: none;
+  stroke: rgb(159 176 197 / 72%);
+  stroke-linecap: round;
+  stroke-width: 1.2;
+  vector-effect: non-scaling-stroke;
+  animation: showcase-link-in 650ms ease both;
 }
 
 .showcase-link-b {
-  top: 68%;
-  left: 23%;
-  width: 51%;
-  transform: rotate(15deg);
   animation-delay: 0.12s;
+}
+
+.showcase-link-c {
+  stroke: rgb(123 229 196 / 55%);
+  stroke-dasharray: 3 5;
+  stroke-dashoffset: 0;
+  animation: showcase-link-fade 1.1s 0.2s ease both;
 }
 
 .showcase-dot {
@@ -122,33 +127,37 @@
 }
 
 .showcase-dot-a {
-  top: 46%;
-  left: 20%;
+  top: 51%;
+  left: 23%;
   background: #45c9a4;
+  translate: -50% -50%;
 }
 
 .showcase-dot-b {
-  top: 66%;
-  left: 32%;
+  top: 71%;
+  left: 35%;
   border-radius: 0;
   background: #45c9a4;
+  translate: -50% -50%;
   transform: rotate(45deg);
   animation-delay: 0.1s;
 }
 
 .showcase-dot-c {
-  top: 40%;
-  right: 24%;
+  top: 45%;
+  left: 79%;
   background: #7e9eff;
+  translate: -50% -50%;
   animation-delay: 0.2s;
 }
 
 .showcase-dot-d {
-  top: 64%;
-  right: 15%;
+  top: 69%;
+  left: 88%;
   border-radius: 0;
   clip-path: polygon(50% 0, 100% 100%, 0 100%);
   background: #7e9eff;
+  translate: -50% -50%;
   animation-delay: 0.3s;
 }
 
@@ -162,8 +171,11 @@
 @keyframes showcase-link-in {
   from {
     opacity: 0;
-    scale: 0 1;
   }
+}
+
+@keyframes showcase-link-fade {
+  from { opacity: 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {

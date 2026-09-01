@@ -1939,20 +1939,38 @@ canvas:focus-visible {
 .primer-cluster-a { top: 24px; left: 8px; }
 .primer-cluster-b { right: 0; bottom: 20px; }
 
-.primer-edge {
+.primer-links {
   position: absolute;
+  inset: 0;
   z-index: 1;
-  height: 1px;
-  background: #75a6cf;
-  box-shadow: 0 0 7px rgba(91, 159, 232, 0.35);
-  transform-origin: left center;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.primer-edge {
+  fill: none;
+  stroke: #75a6cf;
+  stroke-dasharray: 200;
+  stroke-dashoffset: 200;
+  stroke-linecap: round;
+  stroke-width: 1.2;
+  filter: drop-shadow(0 0 4px rgba(91, 159, 232, 0.45));
+  vector-effect: non-scaling-stroke;
   animation: primer-edge-draw 900ms ease-out both;
 }
 
-.primer-edge.edge-a { top: 112px; left: 62px; width: 190px; transform: rotate(17deg); }
-.primer-edge.edge-b { top: 185px; left: 125px; width: 175px; transform: rotate(-25deg); animation-delay: 100ms; }
-.primer-edge.edge-c { top: 80px; left: 176px; width: 150px; transform: rotate(70deg); animation-delay: 180ms; }
-.primer-edge.dotted { height: 0; background: none; border-top: 2px dotted #91a9be; box-shadow: none; }
+.primer-edge.edge-b { animation-delay: 100ms; }
+.primer-edge.edge-c { animation-delay: 180ms; }
+.primer-edge.dotted {
+  stroke: #91a9be;
+  stroke-dasharray: 3 5;
+  stroke-dashoffset: 0;
+  stroke-width: 1.5;
+  filter: none;
+  animation-name: primer-edge-fade;
+}
 
 .primer-node {
   position: absolute;
@@ -1965,10 +1983,10 @@ canvas:focus-visible {
   animation: primer-node-arrive 520ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 
-.primer-node.node-a { top: 96px; left: 48px; color: #cf7de5; background: #cf7de5; }
-.primer-node.node-b { top: 135px; left: 240px; color: #68afff; background: #68afff; animation-delay: 80ms; }
-.primer-node.node-c { top: 218px; left: 112px; width: 27px; height: 27px; color: #ff9f5b; background: #ff9f5b; animation-delay: 150ms; }
-.primer-node.node-d { right: 23px; bottom: 72px; width: 16px; height: 16px; color: #4ad6c3; background: #4ad6c3; animation-delay: 220ms; }
+.primer-node.node-a { top: 34%; left: 16%; color: #cf7de5; background: #cf7de5; translate: -50% -50%; }
+.primer-node.node-b { top: 47%; left: 72%; color: #68afff; background: #68afff; translate: -50% -50%; animation-delay: 80ms; }
+.primer-node.node-c { top: 75%; left: 36%; width: 27px; height: 27px; color: #ff9f5b; background: #ff9f5b; translate: -50% -50%; animation-delay: 150ms; }
+.primer-node.node-d { top: 74%; left: 91%; width: 16px; height: 16px; color: #4ad6c3; background: #4ad6c3; translate: -50% -50%; animation-delay: 220ms; }
 .primer-node.circle { border-radius: 50%; }
 .primer-node.diamond { transform: rotate(45deg); }
 .primer-node.square { border-radius: 2px; }
@@ -1977,12 +1995,13 @@ canvas:focus-visible {
 .primer-pulse {
   position: absolute;
   z-index: 0;
-  top: 203px;
-  left: 96px;
+  top: 75%;
+  left: 36%;
   width: 58px;
   height: 58px;
   border: 1px solid rgba(255, 159, 91, 0.52);
   border-radius: 50%;
+  translate: -50% -50%;
   animation: primer-pulse 1.8s ease-out infinite;
 }
 
@@ -2097,8 +2116,12 @@ canvas:focus-visible {
 .atlas-route-loading small { margin-top: 5px; color: #8198ad; font-size: 9px; }
 
 @keyframes primer-edge-draw {
-  from { opacity: 0; scale: 0 1; }
-  to { opacity: 1; scale: 1 1; }
+  from { opacity: 0; stroke-dashoffset: 200; }
+  to { opacity: 1; stroke-dashoffset: 0; }
+}
+@keyframes primer-edge-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 @keyframes primer-node-arrive {
   from { opacity: 0; scale: 0.4; }
@@ -2260,6 +2283,7 @@ canvas:focus-visible {
   .intro-visual-wrap { min-height: 235px; padding: 22px 30px 8px; border-radius: 17px 17px 0 0; }
   .intro-kicker { top: 18px; left: 21px; }
   .atlas-primer-graphic { width: min(390px, 100%); height: 210px; margin: 22px auto 0; transform: scale(0.78); transform-origin: center; }
+  .primer-cluster-b { bottom: 0; }
   .intro-copy { padding: 28px 30px 32px; }
   .intro-copy h1 { font-size: 28px; }
 }

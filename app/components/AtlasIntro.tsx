@@ -3,9 +3,11 @@ export function AtlasPrimerGraphic({ compact = false }: { compact?: boolean }) {
     <div className={`atlas-primer-graphic ${compact ? "compact" : ""}`} aria-hidden="true">
       <span className="primer-cluster primer-cluster-a">Blood & immune · 18</span>
       <span className="primer-cluster primer-cluster-b">Respiratory · 12</span>
-      <i className="primer-edge edge-a" />
-      <i className="primer-edge edge-b" />
-      <i className="primer-edge edge-c dotted" />
+      <svg className="primer-links" viewBox="0 0 100 100" preserveAspectRatio="none">
+        <path className="primer-edge edge-a" pathLength="1" d="M16 34 C34 30 53 38 72 47" />
+        <path className="primer-edge edge-b" pathLength="1" d="M36 75 C46 65 58 54 72 47" />
+        <path className="primer-edge edge-c dotted" d="M72 47 C83 52 88 63 91 74" />
+      </svg>
       <b className="primer-node node-a circle" />
       <b className="primer-node node-b diamond" />
       <b className="primer-node node-c hexagon" />
