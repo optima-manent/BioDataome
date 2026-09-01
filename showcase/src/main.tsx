@@ -3,7 +3,6 @@ import { createRoot } from "react-dom/client";
 import { AtlasExplorer } from "../../app/components/AtlasExplorer";
 import { adaptPublishedGraph } from "../../app/lib/api-graph";
 import "../../app/globals.css";
-import "./showcase.css";
 
 type StaticManifest = {
   schema: string;
@@ -16,6 +15,46 @@ type StaticManifest = {
 
 const container = document.getElementById("root");
 if (!container) throw new Error("The static page is missing its application root.");
+const root = createRoot(container);
+
+function PrimerGraphic() {
+  return (
+    <div className="showcase-primer" aria-hidden="true">
+      <span className="showcase-cluster-label showcase-cluster-a">Blood studies</span>
+      <span className="showcase-cluster-label showcase-cluster-b">Neural studies</span>
+      <span className="showcase-link showcase-link-a" />
+      <span className="showcase-link showcase-link-b" />
+      <span className="showcase-dot showcase-dot-a" />
+      <span className="showcase-dot showcase-dot-b" />
+      <span className="showcase-dot showcase-dot-c" />
+      <span className="showcase-dot showcase-dot-d" />
+    </div>
+  );
+}
+
+function LoadingRelease() {
+  return (
+    <main className="showcase-loading" aria-live="polite" aria-busy="true">
+      <PrimerGraphic />
+      <strong>C-SKL Atlas</strong>
+      <span>Checking the published 500-study map…</span>
+      <small>Color shows a grouping. Shape shows anatomical context. Lines are evidence links.</small>
+    </main>
+  );
+}
+
+function ReleaseError({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <main className="showcase-loading showcase-error" role="alert">
+      <PrimerGraphic />
+      <strong>Release unavailable</strong>
+      <span>{message}</span>
+      <button type="button" onClick={onRetry}>
+        Try again
+      </button>
+    </main>
+  );
+}
 
 function digestHex(bytes: ArrayBuffer): Promise<string> {
   return crypto.subtle.digest("SHA-256", bytes).then((digest) =>
@@ -58,19 +97,20 @@ async function loadRelease() {
   return graph;
 }
 
-try {
-  const graph = await loadRelease();
-  createRoot(container).render(
-    <StrictMode>
-      <AtlasExplorer graph={graph} synthesisEndpoint={null} />
-    </StrictMode>,
-  );
-} catch (error) {
-  const message = error instanceof Error ? error.message : "The Atlas release could not be loaded.";
-  createRoot(container).render(
-    <main className="showcase-loading showcase-error" role="alert">
-      <strong>Release unavailable</strong>
-      <span>{message}</span>
-    </main>,
-  );
+async function renderRelease() {
+  root.render(<LoadingRelease />);
+  try {
+    const graph = await loadRelease();
+    root.render(
+      <StrictMode>
+        <AtlasExplorer graph={graph} synthesisEndpoint={null} />
+      </StrictMode>,
+    );
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "The Atlas release could not be loaded.";
+    root.render(<ReleaseError message={message} onRetry={() => void renderRelease()} />);
+  }
 }
+
+void renderRelease();

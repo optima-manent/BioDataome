@@ -1,6 +1,6 @@
 {
   "schema": "cskl-core-provenance-v1",
-  "captured_at": "2026-07-22T00:00:00Z",
+  "captured_at": "2026-09-01T12:57:57Z",
   "method_reference": "https://doi.org/10.1038/s41540-019-0117-0",
   "scientific_kernel": {
     "path": "python/cskl.py",
@@ -9,7 +9,7 @@
   },
   "validated_fast_path": {
     "path": "python/cskl_pipeline/scale/fastcore.py",
-    "sha256": "9ff1963d0c5cca3354f3abdfdc9a76dfdab2e97aee7e005450e509b310868255",
+    "sha256": "6601cbcb90f3148a42aeb05bdbced82f0249b81ccb3feaabbc58aa64c9cefedb",
     "role": "Scalable implementation guarded by numerical-faithfulness tests against the scientific kernel."
   },
   "policy": "Production orchestration binds every reuse decision to dependency fingerprints; changes to either numerical implementation require regression evidence and a new provenance record."

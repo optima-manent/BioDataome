@@ -56,6 +56,10 @@ class IngestItem:
     kind: str            # "tar" | "csv"
 
 
+_RAW_INGEST_MANIFEST_SCHEMA = "cskl-scale-ingest-v3"
+_CSV_INGEST_MANIFEST_SCHEMA = "cskl-scale-csv-ingest-v1"
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -64,43 +68,98 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _stage_csv_expr(df: pd.DataFrame, expr_path: Path) -> tuple[Path, str]:
+    """Write stable gzip bytes without replacing the currently published matrix."""
+    pending = expr_path.with_suffix(expr_path.suffix + ".pending")
+    try:
+        df.to_csv(
+            pending,
+            sep="\t",
+            compression={"method": "gzip", "compresslevel": 1, "mtime": 0},
+        )
+        return pending, _sha256_file(pending)
+    except Exception:
+        pending.unlink(missing_ok=True)
+        raise
+
+
 def _raw_ingest_cache_matches(
     store: store_mod.Store,
     platform: str,
     item: IngestItem,
     *,
     alpha: float,
+    seed: int = 0,
+    input_orientation: str = "features-by-samples",
+    max_nonfinite_fraction: float = 0.01,
+    persist_expr: bool = True,
 ) -> bool:
-    """Bind a reusable signature to the exact normalized RAW revision."""
+    """Bind a reusable signature to the exact input and fit configuration."""
 
     if not store.has_valid_signature(item.gse, platform):
         return False
-    if item.kind != "tar":
-        return True
-    source = Path(item.source)
-    if not normalization_cache_matches(source, store.datasets_dir()):
-        return False
-    normalization = read_normalization_manifest(store.datasets_dir(), source)
     manifest_path = store.dataset_dir(item.gse) / "ingest-manifest.json"
-    try:
-        manifest = store_mod.read_json(manifest_path)
-    except (OSError, ValueError, TypeError):
-        return False
     signature_path = store.signature_path(item.gse)
     samples_path = store.sample_hashes_path(item.gse)
     qc_path = store.qc_path(item.gse)
     if not samples_path.is_file() or not qc_path.is_file():
         return False
+    try:
+        manifest = store_mod.read_json(manifest_path)
+        if not isinstance(manifest, dict):
+            return False
+        artifact_hashes_match = (
+            manifest.get("signature_sha256") == _sha256_file(signature_path)
+            and manifest.get("sample_hashes_sha256") == _sha256_file(samples_path)
+            and manifest.get("qc_sha256") == _sha256_file(qc_path)
+        )
+    except (OSError, ValueError, TypeError):
+        return False
+
+    if item.kind == "csv":
+        source = Path(item.source).resolve()
+        try:
+            source_sha256 = _sha256_file(source)
+            cached_expr = manifest.get("persist_expr") is True
+            expr_matches = (
+                isinstance(manifest.get("normalized_sha256"), str)
+                and manifest["normalized_sha256"] == _sha256_file(store.expr_path(item.gse))
+                if cached_expr
+                else not store.expr_path(item.gse).exists()
+            )
+        except OSError:
+            return False
+        return bool(
+            artifact_hashes_match
+            and manifest.get("schema") == _CSV_INGEST_MANIFEST_SCHEMA
+            and manifest.get("kind") == "csv"
+            and manifest.get("source_path") == str(source)
+            and manifest.get("source_sha256") == source_sha256
+            and manifest.get("feature_hash") == store.feature_hash(platform)
+            and manifest.get("alpha") == float(alpha)
+            and manifest.get("seed") == int(seed)
+            and manifest.get("input_orientation") == input_orientation
+            and manifest.get("max_nonfinite_fraction") == float(max_nonfinite_fraction)
+            and (not persist_expr or cached_expr)
+            and expr_matches
+        )
+
+    if item.kind != "tar":
+        return False
+    source = Path(item.source)
+    if not normalization_cache_matches(source, store.datasets_dir()):
+        return False
+    normalization = read_normalization_manifest(store.datasets_dir(), source)
     return bool(
-        normalization
-        and manifest.get("schema") == "cskl-scale-ingest-v2"
+        artifact_hashes_match
+        and normalization
+        and manifest.get("schema") == _RAW_INGEST_MANIFEST_SCHEMA
         and manifest.get("source_sha256") == normalization.get("source_sha256")
         and manifest.get("normalized_sha256") == normalization.get("normalized_sha256")
         and manifest.get("feature_hash") == store.feature_hash(platform)
         and manifest.get("alpha") == float(alpha)
-        and manifest.get("signature_sha256") == _sha256_file(signature_path)
-        and manifest.get("sample_hashes_sha256") == _sha256_file(samples_path)
-        and manifest.get("qc_sha256") == _sha256_file(qc_path)
+        and manifest.get("seed") == int(seed)
+        and manifest.get("max_nonfinite_fraction") == float(max_nonfinite_fraction)
     )
 
 
@@ -161,7 +220,16 @@ def ingest_one(
     feature_hash = store.feature_hash(platform)
 
     # Resume: valid signature already present.
-    if _raw_ingest_cache_matches(store, platform, item, alpha=alpha):
+    if _raw_ingest_cache_matches(
+        store,
+        platform,
+        item,
+        alpha=alpha,
+        seed=seed,
+        input_orientation=input_orientation,
+        max_nonfinite_fraction=max_nonfinite_fraction,
+        persist_expr=persist_expr,
+    ):
         return {"gse": gse, "status": "skip", "reason": "signature_exists"}
     if store.is_quarantined(gse):
         return {
@@ -174,6 +242,8 @@ def ingest_one(
 
     # 1. Get expr.tsv.gz (features x samples).
     expr_path = store.expr_path(gse)
+    csv_source_sha256: Optional[str] = None
+    csv_normalized_sha256: Optional[str] = None
     try:
         if item.kind == "tar":
             produced = normalize_affy_scan(Path(item.source), store.datasets_dir(), rscript)
@@ -183,16 +253,12 @@ def ingest_one(
                 shutil.rmtree(ddir / "raw_extracted", ignore_errors=True)
             df = pd.read_csv(expr_path, sep="\t", index_col=0)
         else:
-            df = load_expr(Path(item.source), orientation=input_orientation)
-            # persist parsed matrix once so we never re-parse. gzip level 1: for the
-            # big GPL570 matrices, level-9 is ~5x slower for ~20% smaller files. When
-            # the source stays available (e.g. a zip), pass persist_expr=False to skip
-            # this entirely - it is not needed for fitting, profiling, or assembly.
-            if persist_expr and not expr_path.exists():
-                tmp = expr_path.with_suffix(expr_path.suffix + ".tmp")
-                df.to_csv(tmp, sep="\t",
-                          compression={"method": "gzip", "compresslevel": 1})
-                os.replace(tmp, expr_path)
+            source_path = Path(item.source).resolve()
+            source_sha256_before = _sha256_file(source_path)
+            df = load_expr(source_path, orientation=input_orientation)
+            csv_source_sha256 = _sha256_file(source_path)
+            if csv_source_sha256 != source_sha256_before:
+                raise RuntimeError("CSV source changed while it was being read")
     except ArchiveSafetyError as exc:
         detail = f"archive_rejected: {exc}"
         _quarantine(store, gse, detail)
@@ -255,38 +321,90 @@ def ingest_one(
             "recovery": "Inspect qc.json and the worker log, then clear quarantine to retry.",
         }
 
-    # A refit invalidates every profile tied to the previous signature. Remove
-    # those derived intermediates before atomically publishing the new signature;
-    # the resumable profile sweep below recreates them from the new science state.
-    for profile_path in ddir.glob("null_profile__*.npz"):
-        profile_path.unlink()
-    store_mod.save_signature(store.signature_path(gse), sig, feature_hash)
-    store_mod.atomic_write_json(
-        store.sample_hashes_path(gse),
-        {"n_samples": int(Ximp.shape[0]), "hashes": _sample_hashes(Ximp)},
-    )
-    qc_dict.update({"c_components": int(len(sig.lam)), "m_samples": int(sig.m_samples)})
-    store_mod.atomic_write_json(store.qc_path(gse), qc_dict)
-    if item.kind == "tar":
-        normalization = read_normalization_manifest(store.datasets_dir(), Path(item.source))
-        if not normalization:
-            raise RuntimeError("normalization provenance was not recorded")
+    # Stage a CSV-derived matrix only after QC and fitting have succeeded. The
+    # stable gzip timestamp makes identical normalized matrices byte-for-byte
+    # reproducible. Publication (or a requested removal) waits until the signature
+    # and its companion provenance artifacts are safely written.
+    pending_expr_path: Optional[Path] = None
+    if item.kind == "csv" and persist_expr:
+        try:
+            pending_expr_path, csv_normalized_sha256 = _stage_csv_expr(df, expr_path)
+        except Exception as exc:
+            _quarantine(store, gse, f"persist_failed: {type(exc).__name__}: {exc}")
+            return {
+                "gse": gse,
+                "status": "quarantine",
+                "reason": "persist_failed",
+                "operator_required": True,
+                "detail": f"{type(exc).__name__}: {exc}",
+                "recovery": "Check storage availability, then clear quarantine to retry.",
+            }
+
+    try:
+        # A refit invalidates every profile tied to the previous signature. Remove
+        # those derived intermediates before atomically publishing the new signature;
+        # the resumable profile sweep below recreates them from the new science state.
+        for profile_path in ddir.glob("null_profile__*.npz"):
+            profile_path.unlink()
+        store_mod.save_signature(store.signature_path(gse), sig, feature_hash)
         store_mod.atomic_write_json(
-            ddir / "ingest-manifest.json",
-            {
-                "schema": "cskl-scale-ingest-v2",
-                "source_sha256": normalization["source_sha256"],
-                "normalized_sha256": normalization["normalized_sha256"],
-                "normalization_script_sha256": normalization[
-                    "normalization_script_sha256"
-                ],
-                "feature_hash": feature_hash,
-                "alpha": float(alpha),
-                "signature_sha256": _sha256_file(store.signature_path(gse)),
-                "sample_hashes_sha256": _sha256_file(store.sample_hashes_path(gse)),
-                "qc_sha256": _sha256_file(store.qc_path(gse)),
-            },
+            store.sample_hashes_path(gse),
+            {"n_samples": int(Ximp.shape[0]), "hashes": _sample_hashes(Ximp)},
         )
+        qc_dict.update({"c_components": int(len(sig.lam)), "m_samples": int(sig.m_samples)})
+        store_mod.atomic_write_json(store.qc_path(gse), qc_dict)
+        if item.kind == "tar":
+            normalization = read_normalization_manifest(store.datasets_dir(), Path(item.source))
+            if not normalization:
+                raise RuntimeError("normalization provenance was not recorded")
+            store_mod.atomic_write_json(
+                ddir / "ingest-manifest.json",
+                {
+                    "schema": _RAW_INGEST_MANIFEST_SCHEMA,
+                    "source_sha256": normalization["source_sha256"],
+                    "normalized_sha256": normalization["normalized_sha256"],
+                    "normalization_script_sha256": normalization[
+                        "normalization_script_sha256"
+                    ],
+                    "feature_hash": feature_hash,
+                    "alpha": float(alpha),
+                    "seed": int(seed),
+                    "max_nonfinite_fraction": float(max_nonfinite_fraction),
+                    "signature_sha256": _sha256_file(store.signature_path(gse)),
+                    "sample_hashes_sha256": _sha256_file(store.sample_hashes_path(gse)),
+                    "qc_sha256": _sha256_file(store.qc_path(gse)),
+                },
+            )
+        else:
+            if csv_source_sha256 is None:
+                raise RuntimeError("CSV source provenance was not recorded")
+            store_mod.atomic_write_json(
+                ddir / "ingest-manifest.json",
+                {
+                    "schema": _CSV_INGEST_MANIFEST_SCHEMA,
+                    "kind": "csv",
+                    "source_path": str(Path(item.source).resolve()),
+                    "source_sha256": csv_source_sha256,
+                    "feature_hash": feature_hash,
+                    "alpha": float(alpha),
+                    "seed": int(seed),
+                    "input_orientation": input_orientation,
+                    "max_nonfinite_fraction": float(max_nonfinite_fraction),
+                    "persist_expr": bool(persist_expr),
+                    "normalized_sha256": csv_normalized_sha256,
+                    "signature_sha256": _sha256_file(store.signature_path(gse)),
+                    "sample_hashes_sha256": _sha256_file(store.sample_hashes_path(gse)),
+                    "qc_sha256": _sha256_file(store.qc_path(gse)),
+                },
+            )
+            if pending_expr_path is not None:
+                os.replace(pending_expr_path, expr_path)
+                pending_expr_path = None
+            else:
+                expr_path.unlink(missing_ok=True)
+    finally:
+        if pending_expr_path is not None:
+            pending_expr_path.unlink(missing_ok=True)
     return {"gse": gse, "status": "ok", "m_samples": int(sig.m_samples),
             "c_components": int(len(sig.lam))}
 
@@ -359,7 +477,16 @@ def run_ingest(
     todo = [
         it
         for it in items
-        if not _raw_ingest_cache_matches(store, platform, it, alpha=alpha)
+        if not _raw_ingest_cache_matches(
+            store,
+            platform,
+            it,
+            alpha=alpha,
+            seed=seed,
+            input_orientation=input_orientation,
+            max_nonfinite_fraction=max_nonfinite_fraction,
+            persist_expr=True,
+        )
         and not store.is_quarantined(it.gse)
     ]
     already = len(items) - len(todo)

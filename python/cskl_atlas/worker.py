@@ -135,6 +135,8 @@ def handle_incremental_score(
     payload: Mapping[str, Any],
     job_id: str,
     worker_id: str,
+    *,
+    lease_seconds: int = 300,
 ) -> Mapping[str, Any]:
     """Persist exactly KxN + K(K-1)/2 raw facts with a durable N cursor."""
 
@@ -181,7 +183,11 @@ def handle_incremental_score(
                 "new_new_complete": False,
             },
         )
-        catalog.heartbeat_job(job_id, worker_id=worker_id)
+        catalog.heartbeat_job(
+            job_id,
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
+        )
 
     if not progress.get("new_new_complete"):
         new_pairs = iter_incremental_cskl_pairs(new_signatures, (), include_new_new=True)
@@ -245,7 +251,7 @@ def _load_profile_for_version(
 ):
     with catalog.reader() as connection:
         artifact = connection.execute(
-            """SELECT a.uri,a.checksum,a.manifest_json,v.feature_hash
+            """SELECT a.uri,a.checksum,a.manifest_json,v.feature_hash,v.signature_hash
                FROM artifacts a JOIN dataset_versions v
                  ON v.version_id=a.dataset_version_id
                WHERE a.dataset_version_id=? AND a.kind=?
@@ -267,11 +273,21 @@ def _load_profile_for_version(
         raise PermanentJobError(f"Null profile is missing or corrupt for {version_id!r}.")
     from cskl_pipeline.scale.store import load_null_profile
 
-    profile = load_null_profile(path)
+    try:
+        profile = load_null_profile(path)
+    except Exception as exc:
+        raise PermanentJobError(
+            f"Null profile schema is obsolete or malformed for {version_id!r}; "
+            "recompute and re-catalog it with the current profile pipeline."
+        ) from exc
     if profile.pool_hash != expected_pool_hash:
         raise PermanentJobError(f"Null profile header pool hash mismatch for {version_id!r}.")
     if profile.feature_hash != artifact["feature_hash"]:
         raise PermanentJobError(f"Null profile feature hash mismatch for {version_id!r}.")
+    if profile.signature_hash != artifact["signature_hash"]:
+        raise PermanentJobError(
+            f"Null profile signature hash mismatch for {version_id!r}; recompute the profile."
+        )
     return profile
 
 
@@ -280,6 +296,8 @@ def handle_calibrate_release(
     payload: Mapping[str, Any],
     job_id: str,
     worker_id: str,
+    *,
+    lease_seconds: int = 300,
 ) -> Mapping[str, Any]:
     calibration_id = str(payload.get("calibration_id") or "")
     profile_kind = str(payload.get("profile_kind") or "")
@@ -360,7 +378,11 @@ def handle_calibrate_release(
                 "clamped_profile_lookups_this_attempt": clamped_lookups_this_attempt,
             },
         )
-        catalog.heartbeat_job(job_id, worker_id=worker_id)
+        catalog.heartbeat_job(
+            job_id,
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
+        )
 
     with catalog.reader() as connection:
         bound_members = [
@@ -498,7 +520,18 @@ def run_one_job(
         )
         return {"job_id": job["job_id"], "status": status}
     try:
-        result = dict(handler(catalog, job["payload"], job["job_id"], worker_id))
+        if any(handler is built_in for built_in in DEFAULT_HANDLERS.values()):
+            result = dict(
+                handler(
+                    catalog,
+                    job["payload"],
+                    job["job_id"],
+                    worker_id,
+                    lease_seconds=lease_seconds,
+                )
+            )
+        else:
+            result = dict(handler(catalog, job["payload"], job["job_id"], worker_id))
     except PermanentJobError as exc:
         status = catalog.fail_job(
             job["job_id"],

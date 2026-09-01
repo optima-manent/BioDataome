@@ -10,7 +10,7 @@ Layout (see plan section 3)::
           pool.npy                     # frozen pool matrix (M x n_features) float32
       datasets/<GSE>/
         signature.npz                  # P (float64), lam, n_features, m_samples, alpha, feature_hash
-        null_profile__<pool_version>.npz
+        null_profile__<pool_version>.npz # grid/stats + signature/pool/config identity
         sample_hashes.json
         qc.json
         expr.tsv.gz                    # normalized matrix (features x samples)
@@ -76,9 +76,22 @@ def sha1_text(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
+def sha256_file(path: Path) -> str:
+    """Return the content identity used to bind derived artifacts to a file."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(8 * 1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def feature_hash_from_probes(probes: List[str]) -> str:
     """Order-sensitive hash of the frozen feature list."""
     return hashlib.sha1(("\n".join(probes)).encode("utf-8")).hexdigest()
+
+
+def _profile_mode_from_pool_meta(meta: dict) -> str:
+    return "exact" if bool(meta.get("exact_size")) else "grid"
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +162,8 @@ def save_null_profile(
     pool_version: str,
     pool_hash: str,
     feature_hash: str,
+    signature_hash: str,
+    alpha: float,
     mode: str,
     B: int,
 ) -> None:
@@ -160,6 +175,8 @@ def save_null_profile(
         pool_version=np.array(pool_version),
         pool_hash=np.array(pool_hash),
         feature_hash=np.array(feature_hash),
+        signature_hash=np.array(signature_hash),
+        alpha=np.float64(alpha),
         mode=np.array(mode),
         B=np.int64(B),
     )
@@ -173,6 +190,8 @@ class NullProfile:
     pool_version: str
     pool_hash: str
     feature_hash: str
+    signature_hash: str
+    alpha: float
     mode: str
     B: int
 
@@ -186,8 +205,10 @@ def load_null_profile(path: Path) -> NullProfile:
             pool_version=str(z["pool_version"]),
             pool_hash=str(z["pool_hash"]),
             feature_hash=str(z["feature_hash"]),
-            mode=str(z["mode"]) if "mode" in z else "grid",
-            B=int(z["B"]) if "B" in z else -1,
+            signature_hash=str(z["signature_hash"]),
+            alpha=float(z["alpha"]),
+            mode=str(z["mode"]),
+            B=int(z["B"]),
         )
 
 
@@ -198,8 +219,10 @@ def read_null_profile_header(path: Path) -> Optional[dict]:
                 "pool_version": str(z["pool_version"]),
                 "pool_hash": str(z["pool_hash"]),
                 "feature_hash": str(z["feature_hash"]),
-                "mode": str(z["mode"]) if "mode" in z else "grid",
-                "B": int(z["B"]) if "B" in z else -1,
+                "signature_hash": str(z["signature_hash"]),
+                "alpha": float(z["alpha"]),
+                "mode": str(z["mode"]),
+                "B": int(z["B"]),
             }
     except Exception:
         return None
@@ -284,6 +307,9 @@ class Store:
             "M_samples": meta.get("M_samples"),
             "feature_hash": meta.get("feature_hash"),
             "matrix_sha1": meta.get("matrix_sha1"),
+            "alpha": meta.get("alpha"),
+            "B": meta.get("B"),
+            "mode": _profile_mode_from_pool_meta(meta),
         }
         return sha1_text(json.dumps(payload, sort_keys=True))
 
@@ -311,8 +337,25 @@ class Store:
         header = read_null_profile_header(path)
         if header is None:
             return False
+        try:
+            pool_meta = read_json(self.pool_meta_path(platform, pool_version))
+            signature_path = self.signature_path(gse)
+            signature_hash_before = sha256_file(signature_path)
+            signature_meta = read_signature_meta(signature_path)
+            signature_hash_after = sha256_file(signature_path)
+            expected_alpha = float(pool_meta["alpha"])
+            expected_B = int(pool_meta["B"])
+            expected_mode = _profile_mode_from_pool_meta(pool_meta)
+        except (KeyError, OSError, TypeError, ValueError):
+            return False
         return (
             header["pool_version"] == pool_version
             and header["feature_hash"] == self.feature_hash(platform)
             and header["pool_hash"] == self.pool_hash(platform, pool_version)
+            and signature_hash_before == signature_hash_after
+            and header["signature_hash"] == signature_hash_after
+            and header["alpha"] == expected_alpha
+            and header["alpha"] == signature_meta["alpha"]
+            and header["B"] == expected_B
+            and header["mode"] == expected_mode
         )

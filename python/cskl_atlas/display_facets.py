@@ -12,6 +12,7 @@ import re
 from collections.abc import Iterable
 
 TISSUE_SYSTEM_VERSION = "atlas-tissue-system-v1"
+DISEASE_FAMILY_VERSION = "atlas-clinical-family-v2"
 
 _UNKNOWN = "Mixed / unspecified"
 _OTHER = "Other anatomy"
@@ -248,3 +249,215 @@ def derive_tissue_system(labels: Iterable[str]) -> str:
     if _OTHER in systems:
         return _OTHER
     return _UNKNOWN
+
+
+_DISEASE_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "Neoplastic",
+        (
+            r"\bcancer\b",
+            r"\bcarcinoma\b",
+            r"\badenocarcinoma\b",
+            r"\btumou?r\b",
+            r"\bneoplasm\b",
+            r"\bleuk(?:a?emia)\b",
+            r"\blymphoma\b",
+            r"\bmelanoma\b",
+            r"\bmyeloma\b",
+            r"\bsarcoma\b",
+            r"\bblastoma\b",
+            r"\bglioma\b",
+            r"\bglioblastoma\b",
+            r"\bmesothelioma\b",
+            r"\bmalignan",
+            r"\bmyelodysplastic\b",
+        ),
+    ),
+    (
+        "Infectious",
+        (
+            r"\binfect(?:ion|ious|ed)\b",
+            r"\bviral\b",
+            r"\bvirus\b",
+            r"\bhiv\b",
+            r"\bhepatitis\b",
+            r"\binfluenza\b",
+            r"\btuberculosis\b",
+            r"\bsepsis\b",
+            r"\bseptic\b",
+            r"\bbacter(?:ia|ial)\b",
+        ),
+    ),
+    (
+        "Immune & inflammatory",
+        (
+            r"\bautoimmune\b",
+            r"\barthritis\b",
+            r"\bdermatitis\b",
+            r"\bpsoriasis\b",
+            r"\binflamm",
+            r"\bmultiple sclerosis\b",
+            r"\bsarcoidosis\b",
+            r"\bvasculitis\b",
+            r"\ballerg",
+            r"\bcrohn",
+            r"\bcolitis\b",
+            r"\bco?eliac\b",
+            r"\blupus\b",
+            r"\bscleroderma\b",
+        ),
+    ),
+    (
+        "Endocrine & metabolic",
+        (
+            r"\bdiabet",
+            r"\bobes",
+            r"\bmetabolic\b",
+            r"\binsulin\b",
+            r"\bthyroid\b",
+            r"\badrenal\b",
+            r"\bhyperglyc",
+            r"\bdyslipid",
+        ),
+    ),
+    (
+        "Neurological & mental health",
+        (
+            r"\balzheimer",
+            r"\bparkinson",
+            r"\bhuntington",
+            r"\bdementia\b",
+            r"\bschizophren",
+            r"\bdepress",
+            r"\banxiety\b",
+            r"\bbipolar\b",
+            r"\bpsychot",
+            r"\bautis",
+            r"\bneurolog",
+            r"\bneuropath",
+            r"\bepilep",
+            r"\bmood disorder\b",
+            r"\bpost-traumatic stress\b",
+        ),
+    ),
+    (
+        "Cardiovascular",
+        (
+            r"\bcardiomyopath",
+            r"\bcardiac\b",
+            r"\bcardiovascular\b",
+            r"\bcoronary\b",
+            r"\bmyocard",
+            r"\batheroscler",
+            r"\bhypertension\b",
+            r"\bheart disease\b",
+            r"\bstroke\b",
+        ),
+    ),
+    (
+        "Respiratory",
+        (
+            r"\bcopd\b",
+            r"\bobstructive pulmonary\b",
+            r"\basthma\b",
+            r"\bcystic fibrosis\b",
+            r"\brespiratory\b",
+            r"\bpulmonary\b",
+            r"\bairway\b",
+            r"\bemphysema\b",
+        ),
+    ),
+    (
+        "Digestive & hepatic",
+        (
+            r"\bcirrhosis\b",
+            r"\bliver disease\b",
+            r"\bhepatic disease\b",
+            r"\bbowel disease\b",
+            r"\bgastric disease\b",
+            r"\bpancreatitis\b",
+            r"\bintestinal disease\b",
+        ),
+    ),
+    (
+        "Renal & reproductive",
+        (
+            r"\bkidney disease\b",
+            r"\brenal disease\b",
+            r"\bnephro",
+            r"\bendometriosis\b",
+            r"\binfertil",
+            r"\bpolycystic ovar",
+            r"\bpreeclampsia\b",
+        ),
+    ),
+    (
+        "Injury & exposure",
+        (
+            r"\bburn\b",
+            r"\binjur",
+            r"\btrauma\b",
+            r"\btobacco\b",
+            r"\bsmoking\b",
+            r"\birradiat",
+            r"\bradiation exposure\b",
+            r"\btoxic",
+            r"\bexpos(?:ure|ed)\b",
+            r"\bpoison",
+        ),
+    ),
+    (
+        "Reference / no disease",
+        (
+            r"\bhealthy\b",
+            r"\bnormal\b",
+            r"\bcontrol\b",
+            r"\breference\b",
+            r"\bnon-diabetic\b",
+        ),
+    ),
+)
+
+_COMPILED_DISEASE = tuple(
+    (family, tuple(re.compile(pattern, re.IGNORECASE) for pattern in patterns))
+    for family, patterns in _DISEASE_PATTERNS
+)
+
+
+def _classify_disease_segment(value: str) -> str:
+    text = " ".join(value.strip().split())
+    if not text or re.fullmatch(r"(?:unknown(?: / not reviewed)?|not reviewed)", text, re.I):
+        return "Unreviewed"
+    for family, patterns in _COMPILED_DISEASE:
+        if any(pattern.search(text) for pattern in patterns):
+            return family
+    return "Other / unclassified"
+
+
+def derive_disease_family(labels: Iterable[str]) -> str:
+    """Return a broad display family without assigning a diagnosis code.
+
+    Callers pass only ontology-label-concordant or curator-accepted labels. An
+    empty input therefore stays visibly unreviewed instead of being inferred
+    from draft text.
+    """
+
+    segments = [
+        segment
+        for label in labels
+        for segment in re.split(r"\s*;\s*", str(label))
+        if segment
+    ]
+    if not segments:
+        return "Unreviewed"
+    families = {_classify_disease_segment(segment) for segment in segments}
+    informative = families - {"Unreviewed", "Other / unclassified", "Reference / no disease"}
+    if len(informative) > 1:
+        return "Mixed disease families"
+    if len(informative) == 1:
+        return next(iter(informative))
+    if "Reference / no disease" in families:
+        return "Reference / no disease"
+    if "Other / unclassified" in families:
+        return "Other / unclassified"
+    return "Unreviewed"

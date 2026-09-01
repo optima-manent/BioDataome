@@ -238,6 +238,7 @@ def build_graph_snapshot(
     seed: int,
     stability_runs: int = 5,
     text_release_id: str | None = None,
+    independent_calibration_id: str | None = None,
 ) -> dict[str, Any]:
     """Build and stage (but never auto-publish) one auditable graph snapshot."""
 
@@ -464,6 +465,7 @@ def build_graph_snapshot(
         manifest_uri=str(manifest_path),
         manifest_checksum=checksum,
         text_release_id=text_release_id,
+        independent_calibration_id=independent_calibration_id,
         datasets=[
             (node_id, x, y, community)
             for node_id, (x, y), community in zip(node_ids, coordinates, communities, strict=True)

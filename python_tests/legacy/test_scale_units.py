@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 import cskl
-from cskl_pipeline.scale import align, grid, qc, store as store_mod
+from cskl_pipeline.scale import align, grid, profile, qc, store as store_mod
 from cskl_pipeline.scale import fastcore as fc
 
 
@@ -111,11 +111,162 @@ def test_atomic_json_and_null_profile(tmp_path):
     store_mod.save_null_profile(
         npz, grid=np.array([4, 10]), mu=np.array([1.0, 2.0]),
         sigma=np.array([0.1, 0.2]), pool_version="pool_v1", pool_hash="ph",
-        feature_hash="fh", mode="grid", B=100,
+        feature_hash="fh", signature_hash="a" * 64, alpha=0.5, mode="grid", B=100,
     )
     prof = store_mod.load_null_profile(npz)
     assert list(prof.grid) == [4, 10]
     assert prof.pool_version == "pool_v1" and prof.B == 100
+    assert prof.alpha == 0.5
+    assert prof.signature_hash == "a" * 64
+
+
+def _minimal_signature(alpha=0.5):
+    return cskl.PCASignature(
+        P=np.array([[1.0], [0.0], [0.0]]),
+        lam=np.array([alpha * 3.0]),
+        n_features=3,
+        m_samples=4,
+        alpha=alpha,
+    )
+
+
+def _profile_store(tmp_path):
+    store = store_mod.Store(tmp_path / "store")
+    store.write_probes("GPL570", ["p1", "p2", "p3"])
+    feature_hash = store.feature_hash("GPL570")
+    meta = {
+        "seed": 11,
+        "grid": [4, 10],
+        "M_samples": 20,
+        "feature_hash": feature_hash,
+        "matrix_sha1": "matrix-v1",
+        "alpha": 0.5,
+        "B": 100,
+        "exact_size": False,
+    }
+    store_mod.atomic_write_json(store.pool_meta_path("GPL570", "pool_v1"), meta)
+    store_mod.save_signature(
+        store.signature_path("GSE1"), _minimal_signature(), feature_hash
+    )
+    return store, meta
+
+
+def test_pool_hash_includes_profile_parameters(tmp_path):
+    store, meta = _profile_store(tmp_path)
+    hashes = {store.pool_hash("GPL570", "pool_v1")}
+
+    for update in ({"alpha": 0.6}, {"B": 101}, {"exact_size": True}):
+        store_mod.atomic_write_json(
+            store.pool_meta_path("GPL570", "pool_v1"), {**meta, **update}
+        )
+        hashes.add(store.pool_hash("GPL570", "pool_v1"))
+
+    assert len(hashes) == 4
+
+
+@pytest.mark.parametrize(
+    ("alpha", "B", "mode"),
+    [(0.6, 100, "grid"), (0.5, 99, "grid"), (0.5, 100, "exact")],
+)
+def test_profile_validation_rejects_mismatched_parameters(tmp_path, alpha, B, mode):
+    store, _ = _profile_store(tmp_path)
+    store_mod.save_null_profile(
+        store.null_profile_path("GSE1", "pool_v1"),
+        grid=np.array([4, 10]),
+        mu=np.array([1.0, 2.0]),
+        sigma=np.array([0.1, 0.2]),
+        pool_version="pool_v1",
+        pool_hash=store.pool_hash("GPL570", "pool_v1"),
+        feature_hash=store.feature_hash("GPL570"),
+        signature_hash=store_mod.sha256_file(store.signature_path("GSE1")),
+        alpha=alpha,
+        mode=mode,
+        B=B,
+    )
+
+    assert not store.has_valid_profile("GSE1", "GPL570", "pool_v1")
+
+
+def test_profile_header_and_validation_bind_configuration(tmp_path):
+    store, _ = _profile_store(tmp_path)
+    path = store.null_profile_path("GSE1", "pool_v1")
+    store_mod.save_null_profile(
+        path,
+        grid=np.array([4, 10]),
+        mu=np.array([1.0, 2.0]),
+        sigma=np.array([0.1, 0.2]),
+        pool_version="pool_v1",
+        pool_hash=store.pool_hash("GPL570", "pool_v1"),
+        feature_hash=store.feature_hash("GPL570"),
+        signature_hash=store_mod.sha256_file(store.signature_path("GSE1")),
+        alpha=0.5,
+        mode="grid",
+        B=100,
+    )
+
+    header = store_mod.read_null_profile_header(path)
+    assert header is not None
+    assert (header["alpha"], header["B"], header["mode"]) == (0.5, 100, "grid")
+    assert header["signature_hash"] == store_mod.sha256_file(store.signature_path("GSE1"))
+    assert store.has_valid_profile("GSE1", "GPL570", "pool_v1")
+
+
+def test_profile_validation_rejects_same_alpha_signature_replacement(tmp_path):
+    store, _ = _profile_store(tmp_path)
+    signature_path = store.signature_path("GSE1")
+    profile_path = store.null_profile_path("GSE1", "pool_v1")
+    store_mod.save_null_profile(
+        profile_path,
+        grid=np.array([4, 10]),
+        mu=np.array([1.0, 2.0]),
+        sigma=np.array([0.1, 0.2]),
+        pool_version="pool_v1",
+        pool_hash=store.pool_hash("GPL570", "pool_v1"),
+        feature_hash=store.feature_hash("GPL570"),
+        signature_hash=store_mod.sha256_file(signature_path),
+        alpha=0.5,
+        mode="grid",
+        B=100,
+    )
+    assert store.has_valid_profile("GSE1", "GPL570", "pool_v1")
+
+    replacement = cskl.PCASignature(
+        P=np.array([[0.0], [1.0], [0.0]]),
+        lam=np.array([1.5]),
+        n_features=3,
+        m_samples=4,
+        alpha=0.5,
+    )
+    store_mod.save_signature(signature_path, replacement, store.feature_hash("GPL570"))
+
+    assert not store.has_valid_profile("GSE1", "GPL570", "pool_v1")
+
+
+def test_incomplete_legacy_profile_is_invalidated_safely(tmp_path):
+    store, _ = _profile_store(tmp_path)
+    path = store.null_profile_path("GSE1", "pool_v1")
+    store_mod.atomic_save_npz(
+        path,
+        grid=np.array([4, 10]),
+        mu=np.array([1.0, 2.0]),
+        sigma=np.array([0.1, 0.2]),
+        pool_version=np.array("pool_v1"),
+        pool_hash=np.array(store.pool_hash("GPL570", "pool_v1")),
+        feature_hash=np.array(store.feature_hash("GPL570")),
+    )
+
+    assert store_mod.read_null_profile_header(path) is None
+    assert not store.has_valid_profile("GSE1", "GPL570", "pool_v1")
+
+
+def test_profile_bootstrap_override_cannot_diverge_from_pool(tmp_path):
+    store, _ = _profile_store(tmp_path)
+
+    class Pool:
+        B = 100
+
+    with pytest.raises(ValueError, match="must match the frozen pool B"):
+        profile.compute_profiles(store, Pool(), ["GSE1"], B=2, verbose=False)
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +300,24 @@ def test_batched_null_matches_loop_synthetic():
     loop = np.array([cskl.cskl(sigP, r) for r in nulls])
     batched = fc.batched_null_cskl(sigP, bank)
     assert np.max(np.abs(loop - batched)) <= 1e-9
+
+
+def test_signature_bank_rejects_mixed_alpha():
+    with pytest.raises(ValueError, match="same alpha"):
+        fc.SignatureBank([_minimal_signature(0.5), _minimal_signature(0.6)])
+
+
+def test_batched_null_rejects_query_bank_alpha_mismatch():
+    bank = fc.SignatureBank([_minimal_signature(0.6)])
+    with pytest.raises(ValueError, match="same alpha"):
+        fc.batched_null_cskl(_minimal_signature(0.5), bank)
+
+
+def test_batched_many_rejects_query_bank_alpha_mismatch():
+    query = fc.SignatureBank([_minimal_signature(0.5)])
+    bank = fc.SignatureBank([_minimal_signature(0.6)])
+    with pytest.raises(ValueError, match="same alpha"):
+        fc.batched_null_cskl_many(query, bank)
 
 
 def test_observed_matrix_matches_loop_synthetic():

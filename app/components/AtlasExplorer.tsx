@@ -1,22 +1,33 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { GraphCanvas, type ClusterMode, type GraphMode } from "./GraphCanvas";
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { AtlasIntro } from "./AtlasIntro";
+import {
+  GraphCanvas,
+  type ClusterMode,
+  type GraphGroupSelection,
+  type GraphMode,
+} from "./GraphCanvas";
 import {
   buildAiEvidencePacket,
   computedSpecter2,
   edgeMatchesLens,
+  formatProbability,
   hasComputedSpecter2,
   isOverlapQualified,
   type EvidenceLens,
 } from "../lib/evidence-policy";
 import {
-  diseaseShapeLabel,
+  diseaseFamilyColor,
+  nodeColor,
   nodeTissueSystem,
   tissueColor,
+  tissueShape,
+  type DiseaseFamily,
   type GraphDataset,
   type GraphEdge,
   type GraphNode,
+  type NodeColorMode,
   type Tissue,
 } from "../lib/graph-data";
 import {
@@ -37,9 +48,15 @@ import {
   serializeResearchExportCsv,
   serializeResearchExportJson,
 } from "../lib/research-export";
+import { graphGroupIdentity } from "../lib/graph-layout";
 
 type Lens = EvidenceLens;
 type AiState = { status: "idle" | "loading" | "ready" | "error"; content?: string };
+type FocusedGroup = GraphGroupSelection & { mode: ClusterMode };
+
+const EDGE_Q_THRESHOLDS = [1e-12, 1e-9, 1e-6, 1e-4, 1e-3, 1e-2, 0.05] as const;
+const SAMPLE_THRESHOLDS = [2, 10, 25, 50, 100, 250, 500, 1_000, 2_000] as const;
+const INTRO_STORAGE_KEY = "cskl-atlas:intro:v2";
 
 const lensCopy: Record<Lens, { label: string; detail: string }> = {
   all: { label: "All supported links", detail: "The published graph evidence network." },
@@ -65,8 +82,27 @@ function formatCskl(value: number) {
   return value < 0.001 ? value.toExponential(2) : value.toFixed(4);
 }
 
+function formatPublishedDate(value: string) {
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(new Date(value));
+}
+
 function endpoint(edge: GraphEdge, nodeId: string) {
   return edge.source === nodeId ? edge.target : edge.source;
+}
+
+function NodeGlyph({ node, colorMode }: { node: GraphNode; colorMode: NodeColorMode }) {
+  return (
+    <i
+      aria-hidden="true"
+      className={`node-glyph shape-${tissueShape(nodeTissueSystem(node))}`}
+      style={{ background: nodeColor(node, colorMode) }}
+    />
+  );
 }
 
 function SourceBadge({ node }: { node: GraphNode }) {
@@ -131,15 +167,20 @@ export function AtlasExplorer({
   );
   const [mode, setMode] = useState<GraphMode>("cskl");
   const [clusterMode, setClusterMode] = useState<ClusterMode>("topology");
+  const [nodeColorMode, setNodeColorMode] = useState<NodeColorMode>("tissue");
   const [lens, setLens] = useState<Lens>("all");
   const [search, setSearch] = useState("");
   const [activeTissueSystems, setActiveTissueSystems] = useState<Set<Tissue>>(
     () => new Set(graph.nodes.map((node) => nodeTissueSystem(node))),
   );
-  const [minSamples, setMinSamples] = useState(2);
+  const [sampleThresholdIndex, setSampleThresholdIndex] = useState(0);
+  const [edgeQStep, setEdgeQStep] = useState(EDGE_Q_THRESHOLDS.length - 1);
+  const [focusedGroup, setFocusedGroup] = useState<FocusedGroup | null>(null);
   const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set());
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [controlsOpen, setControlsOpen] = useState(false);
+  const [introOpen, setIntroOpen] = useState(true);
   const [aiState, setAiState] = useState<AiState>({ status: "idle" });
   const [queryOpen, setQueryOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -149,11 +190,77 @@ export function AtlasExplorer({
   const [activeQuery, setActiveQuery] = useState<DiscoveryQuery | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
+  const introReturnFocusRef = useRef<HTMLElement | null>(null);
+  const aiAbortRef = useRef<AbortController | null>(null);
+  const aiRequestRef = useRef(0);
+  const aiRequestedPacketFingerprintRef = useRef<string | null>(null);
+  const showAllButtonRef = useRef<HTMLButtonElement>(null);
+  const exportTriggerRef = useRef<HTMLButtonElement>(null);
+  const controlsTriggerRef = useRef<HTMLButtonElement>(null);
+  const queryTriggerRef = useRef<HTMLButtonElement>(null);
+  const queryPanelRef = useRef<HTMLElement>(null);
   const hasTextEvidence = useMemo(() => hasComputedSpecter2(graph.edges), [graph.edges]);
   const explainerCoverage = useMemo(
     () => graph.edges.filter((edge) => edge.explainer).length,
     [graph.edges],
   );
+  const minSamples = SAMPLE_THRESHOLDS[sampleThresholdIndex];
+  const maxQValue = EDGE_Q_THRESHOLDS[edgeQStep];
+
+  const diseaseFamilyCounts = useMemo(() => {
+    const counts = new Map<DiseaseFamily, number>();
+    for (const node of graph.nodes) {
+      counts.set(node.diseaseFamily, (counts.get(node.diseaseFamily) ?? 0) + 1);
+    }
+    return [...counts.entries()].sort(
+      ([leftFamily, leftCount], [rightFamily, rightCount]) =>
+        rightCount - leftCount || leftFamily.localeCompare(rightFamily),
+    );
+  }, [graph.nodes]);
+
+  const resetAi = useCallback(() => {
+    aiRequestRef.current += 1;
+    aiAbortRef.current?.abort();
+    aiAbortRef.current = null;
+    aiRequestedPacketFingerprintRef.current = null;
+    setAiState({ status: "idle" });
+  }, []);
+
+  const closeExport = useCallback(() => {
+    setExportOpen(false);
+    window.requestAnimationFrame(() => exportTriggerRef.current?.focus());
+  }, []);
+
+  const closeControls = useCallback(() => {
+    setControlsOpen(false);
+    window.requestAnimationFrame(() => controlsTriggerRef.current?.focus());
+  }, []);
+
+  const leaveFocusedGroup = useCallback(() => {
+    setFocusedGroup(null);
+    window.requestAnimationFrame(() => {
+      document
+        .querySelector<HTMLCanvasElement>('[data-testid="graph-stage"] canvas')
+        ?.focus();
+    });
+  }, []);
+
+  const closeQuery = useCallback(() => {
+    setQueryOpen(false);
+    window.requestAnimationFrame(() => queryTriggerRef.current?.focus());
+  }, []);
+
+  useEffect(() => () => aiAbortRef.current?.abort(), []);
+
+  useEffect(() => {
+    if (!focusedGroup) return;
+    window.requestAnimationFrame(() => showAllButtonRef.current?.focus());
+  }, [focusedGroup]);
+
+  useEffect(() => {
+    if (!queryOpen) return;
+    window.requestAnimationFrame(() => queryPanelRef.current?.focus());
+  }, [queryOpen]);
 
   useEffect(() => {
     const focusSearch = (event: KeyboardEvent) => {
@@ -165,12 +272,61 @@ export function AtlasExplorer({
     return () => window.removeEventListener("keydown", focusSearch);
   }, []);
 
+  useEffect(() => {
+    let dismissed = false;
+    try {
+      dismissed = window.sessionStorage.getItem(INTRO_STORAGE_KEY) === "dismissed";
+    } catch {
+      // Storage may be unavailable in a privacy-restricted browser. The primer
+      // still works for this visit without persisting its dismissal.
+    }
+    if (!dismissed) return;
+    const timer = window.setTimeout(() => setIntroOpen(false), 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    const closeTopLayer = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || introOpen) return;
+      if (controlsOpen) {
+        event.preventDefault();
+        closeControls();
+        return;
+      }
+      if (queryOpen) {
+        event.preventDefault();
+        closeQuery();
+        return;
+      }
+      if (exportOpen) {
+        event.preventDefault();
+        closeExport();
+        return;
+      }
+      if (!focusedGroup) return;
+      event.preventDefault();
+      leaveFocusedGroup();
+    };
+    window.addEventListener("keydown", closeTopLayer);
+    return () => window.removeEventListener("keydown", closeTopLayer);
+  }, [
+    closeControls,
+    closeExport,
+    closeQuery,
+    controlsOpen,
+    exportOpen,
+    focusedGroup,
+    introOpen,
+    leaveFocusedGroup,
+    queryOpen,
+  ]);
+
   const nodeMap = useMemo(
     () => new Map(graph.nodes.map((node) => [node.id, node])),
     [graph.nodes],
   );
 
-  const baseNodes = useMemo(() => {
+  const filteredNodes = useMemo(() => {
     const needle = search.trim().toLowerCase();
     return graph.nodes.filter((node) => {
       const matchesSearch =
@@ -183,13 +339,20 @@ export function AtlasExplorer({
     });
   }, [activeTissueSystems, graph.nodes, minSamples, search]);
 
+  const baseNodes = useMemo(() => {
+    if (!focusedGroup || focusedGroup.mode !== clusterMode) return filteredNodes;
+    return filteredNodes.filter(
+      (node) => graphGroupIdentity(node, focusedGroup.mode).id === focusedGroup.id,
+    );
+  }, [clusterMode, filteredNodes, focusedGroup]);
+
   const visibleNodeIds = useMemo(() => new Set(baseNodes.map((node) => node.id)), [baseNodes]);
   const csklMedian = useMemo(() => {
     const values = [...graph.edges].map((edge) => edge.cskl).sort((a, b) => a - b);
-    return values[Math.floor(values.length / 2)];
+    return values.length ? values[Math.floor(values.length / 2)] : Number.POSITIVE_INFINITY;
   }, [graph.edges]);
 
-  const candidateEdges = useMemo(
+  const allCandidateEdges = useMemo(
     () =>
       graph.edges.filter((edge) => {
         if (!visibleNodeIds.has(edge.source) || !visibleNodeIds.has(edge.target)) return false;
@@ -198,9 +361,22 @@ export function AtlasExplorer({
     [graph.edges, nodeMap, visibleNodeIds],
   );
 
+  const candidateEdges = useMemo(
+    () => allCandidateEdges.filter((edge) => edge.qValue <= maxQValue),
+    [allCandidateEdges, maxQValue],
+  );
+
+  const evidenceEdges = useMemo(
+    () =>
+      mode === "cskl"
+        ? candidateEdges
+        : candidateEdges.filter((edge) => computedSpecter2(edge) !== undefined),
+    [candidateEdges, mode],
+  );
+
   const visibleEdges = useMemo(
     () =>
-      candidateEdges.filter((edge) => {
+      evidenceEdges.filter((edge) => {
         const source = nodeMap.get(edge.source);
         const target = nodeMap.get(edge.target);
         if (!source || !target) return false;
@@ -209,14 +385,14 @@ export function AtlasExplorer({
           ? edgeMatchesDiscoveryQuery({ edge, source, target, query: activeQuery })
           : true;
       }),
-    [activeQuery, candidateEdges, csklMedian, lens, nodeMap],
+    [activeQuery, csklMedian, evidenceEdges, lens, nodeMap],
   );
 
   const draftQueryValid = queryIsValid(draftQuery);
   const draftQueryResultCount = useMemo(
     () =>
       draftQueryValid
-        ? candidateEdges.filter((edge) => {
+        ? allCandidateEdges.filter((edge) => {
             const source = nodeMap.get(edge.source);
             const target = nodeMap.get(edge.target);
             return Boolean(
@@ -226,7 +402,7 @@ export function AtlasExplorer({
             );
           }).length
         : 0,
-    [candidateEdges, draftQuery, draftQueryValid, nodeMap],
+    [allCandidateEdges, draftQuery, draftQueryValid, nodeMap],
   );
 
   const graphNodes = useMemo(() => {
@@ -238,14 +414,43 @@ export function AtlasExplorer({
   const selectedEdge = selectedEdgeId
     ? graph.edges.find((edge) => edge.id === selectedEdgeId) ?? null
     : null;
-  const selectedNodes = [...selectedNodeIds]
-    .map((id) => nodeMap.get(id))
-    .filter((node): node is GraphNode => Boolean(node));
+  const selectedNodes = useMemo(
+    () =>
+      [...selectedNodeIds]
+        .map((id) => nodeMap.get(id))
+        .filter((node): node is GraphNode => Boolean(node)),
+    [nodeMap, selectedNodeIds],
+  );
   const primaryNode = selectedNodes.length === 1 ? selectedNodes[0] : null;
+  const aiEvidencePacket = useMemo(
+    () =>
+      buildAiEvidencePacket({
+        selectedEdge,
+        selectedNodes,
+        visibleEdges,
+        selectedNodeIds,
+        nodeMap,
+      }),
+    [nodeMap, selectedEdge, selectedNodeIds, selectedNodes, visibleEdges],
+  );
+  const aiEvidencePacketFingerprint = useMemo(
+    () => JSON.stringify(aiEvidencePacket),
+    [aiEvidencePacket],
+  );
+
+  useEffect(() => {
+    const requestedFingerprint = aiRequestedPacketFingerprintRef.current;
+    if (
+      requestedFingerprint !== null &&
+      requestedFingerprint !== aiEvidencePacketFingerprint
+    ) {
+      resetAi();
+    }
+  }, [aiEvidencePacketFingerprint, resetAi]);
 
   const setSingleNode = (id: string, additive: boolean) => {
     setSelectedEdgeId(null);
-    setAiState({ status: "idle" });
+    resetAi();
     setSelectedNodeIds((current) => {
       if (!additive) return new Set([id]);
       const next = new Set(current);
@@ -259,36 +464,87 @@ export function AtlasExplorer({
   const selectEdge = (id: string) => {
     setSelectedEdgeId(id);
     setSelectedNodeIds(new Set());
-    setAiState({ status: "idle" });
+    resetAi();
     setInspectorOpen(true);
   };
 
   const clearSelection = () => {
     setSelectedNodeIds(new Set());
     setSelectedEdgeId(null);
-    setAiState({ status: "idle" });
+    resetAi();
+  };
+
+  const changeEdgeQStep = (nextStep: number) => {
+    const nextMaxQValue = EDGE_Q_THRESHOLDS[nextStep];
+    setEdgeQStep(nextStep);
+    if (selectedEdge && selectedEdge.qValue > nextMaxQValue) {
+      setSelectedEdgeId(null);
+      resetAi();
+    }
+  };
+
+  const changeEvidenceMode = (nextMode: GraphMode) => {
+    setMode(nextMode);
+    if (nextMode !== "cskl" && selectedEdge && computedSpecter2(selectedEdge) === undefined) {
+      setSelectedEdgeId(null);
+      resetAi();
+    }
+  };
+
+  const changeClusterMode = (nextMode: ClusterMode) => {
+    setClusterMode(nextMode);
+    setFocusedGroup(null);
+    if (nextMode === "tissue") setNodeColorMode("tissue");
+    if (nextMode === "disease") setNodeColorMode("disease");
+    clearSelection();
+  };
+
+  const focusGroup = (group: GraphGroupSelection) => {
+    setFocusedGroup({ ...group, mode: clusterMode });
+    setControlsOpen(false);
+    clearSelection();
+  };
+
+  const dismissIntro = () => {
+    try {
+      window.sessionStorage.setItem(INTRO_STORAGE_KEY, "dismissed");
+    } catch {
+      // The primer can close normally even when storage is unavailable.
+    }
+    setIntroOpen(false);
+    const returnTarget = introReturnFocusRef.current;
+    introReturnFocusRef.current = null;
+    window.requestAnimationFrame(() => returnTarget?.focus());
+  };
+
+  const openIntro = () => {
+    introReturnFocusRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setIntroOpen(true);
   };
 
   const askAi = async () => {
     if (!synthesisEndpoint) return;
-    const evidence = buildAiEvidencePacket({
-      selectedEdge,
-      selectedNodes,
-      visibleEdges,
-      selectedNodeIds,
-      nodeMap,
-    });
+    aiAbortRef.current?.abort();
+    const controller = new AbortController();
+    aiAbortRef.current = controller;
+    const requestId = ++aiRequestRef.current;
+    const evidence = aiEvidencePacket;
+    aiRequestedPacketFingerprintRef.current = aiEvidencePacketFingerprint;
     setAiState({ status: "loading" });
     try {
       const response = await fetch(synthesisEndpoint, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(evidence),
+        signal: controller.signal,
       });
       const data = (await response.json()) as { explanation?: string; message?: string };
       if (!response.ok) throw new Error(data.message || "The explanation service is not configured.");
+      if (requestId !== aiRequestRef.current) return;
       setAiState({ status: "ready", content: data.explanation });
     } catch (error) {
+      if (controller.signal.aborted || requestId !== aiRequestRef.current) return;
       setAiState({
         status: "error",
         content:
@@ -296,6 +552,8 @@ export function AtlasExplorer({
             ? error.message
             : "The selected evidence packet is ready, but the explanation service is unavailable.",
       });
+    } finally {
+      if (requestId === aiRequestRef.current) aiAbortRef.current = null;
     }
   };
 
@@ -306,11 +564,11 @@ export function AtlasExplorer({
     if (nextLens === "agreement") setMode("agreement");
     if (nextLens === "cskl-only") setMode("agreement");
     clearSelection();
-    setQueryOpen(false);
+    if (queryOpen) closeQuery();
   };
 
   const nodeConnections = primaryNode
-    ? graph.edges
+    ? visibleEdges
         .filter((edge) => edge.source === primaryNode.id || edge.target === primaryNode.id)
         .sort((a, b) => a.cskl - b.cskl)
         .slice(0, 5)
@@ -337,6 +595,12 @@ export function AtlasExplorer({
           search,
           activeTissueSystems: [...activeTissueSystems],
           minSamples,
+          maxQValue,
+          nodeColorMode,
+          focusedCluster: focusedGroup
+            ? `${focusedGroup.mode}:${focusedGroup.label}`
+            : undefined,
+          discoveryQuery: activeQuery,
         },
       });
       const content =
@@ -349,7 +613,7 @@ export function AtlasExplorer({
         format === "json" ? "application/json" : "text/csv",
       );
       setExportError(null);
-      setExportOpen(false);
+      closeExport();
     } catch (error) {
       setExportError(error instanceof Error ? error.message : "The research export could not be prepared.");
     }
@@ -357,6 +621,11 @@ export function AtlasExplorer({
 
   return (
     <main className={`atlas-shell ${inspectorOpen ? "inspector-visible" : ""}`}>
+      <div
+        className="atlas-workspace"
+        aria-hidden={introOpen}
+        inert={introOpen ? true : undefined}
+      >
       <header className="atlas-header">
         <div className="brand-lockup" aria-label="C-SKL Atlas">
           <span className="brand-mark" aria-hidden="true">
@@ -391,18 +660,26 @@ export function AtlasExplorer({
           <div
             className="export-control"
             onKeyDown={(event) => {
-              if (event.key === "Escape") setExportOpen(false);
+              if (event.key !== "Escape") return;
+              event.preventDefault();
+              event.stopPropagation();
+              closeExport();
             }}
           >
             <button
+              ref={exportTriggerRef}
               type="button"
               className="export-button"
               aria-expanded={exportOpen}
               aria-haspopup="dialog"
               onClick={() => {
-                setExportOpen((value) => !value);
+                if (exportOpen) closeExport();
+                else {
+                  setExportOpen(true);
+                  setQueryOpen(false);
+                  setControlsOpen(false);
+                }
                 setExportError(null);
-                setQueryOpen(false);
               }}
             >
               <span aria-hidden="true">↓</span>
@@ -428,24 +705,60 @@ export function AtlasExplorer({
             )}
           </div>
           <button
+            ref={queryTriggerRef}
             type="button"
             className={`query-button ${activeQuery ? "active" : ""}`}
             aria-pressed={Boolean(activeQuery)}
+            aria-expanded={queryOpen}
+            aria-haspopup="dialog"
             onClick={() => {
-              setQueryOpen((value) => !value);
-              setExportOpen(false);
+              if (queryOpen) closeQuery();
+              else {
+                setQueryOpen(true);
+                setExportOpen(false);
+                setControlsOpen(false);
+              }
             }}
           >
             <span aria-hidden="true">⌘</span> {activeQuery ? "Query active" : "Discovery query"}
           </button>
-          <button type="button" className="icon-button" aria-label="Open workspace information">
+          <button
+            ref={controlsTriggerRef}
+            type="button"
+            className={`mobile-controls-button ${controlsOpen ? "active" : ""}`}
+            aria-label={controlsOpen ? "Close graph controls" : "Open graph controls"}
+            aria-expanded={controlsOpen}
+            onClick={() => {
+              if (controlsOpen) closeControls();
+              else {
+                setControlsOpen(true);
+                setExportOpen(false);
+                setQueryOpen(false);
+              }
+            }}
+          >
+            <span aria-hidden="true">≡</span>
+          </button>
+          <button
+            type="button"
+            className="icon-button"
+            aria-label="How to read the atlas"
+            onClick={openIntro}
+          >
             ?
           </button>
         </div>
       </header>
 
-      <aside className="lens-panel" aria-label="Graph controls">
+      <aside className={`lens-panel ${controlsOpen ? "mobile-open" : ""}`} aria-label="Graph controls">
         <div className="panel-scroll">
+          <div className="mobile-panel-heading">
+            <strong>Graph controls</strong>
+            <span>
+              <button type="button" onClick={openIntro}>How to read</button>
+              <button type="button" aria-label="Close graph controls" onClick={closeControls}>×</button>
+            </span>
+          </div>
           <div className="panel-eyebrow">Evidence layer</div>
           <div className="mode-switcher" role="group" aria-label="Evidence layer">
             {(["cskl", "specter2", "agreement"] as GraphMode[]).map((item) => (
@@ -460,7 +773,7 @@ export function AtlasExplorer({
                     ? "Unavailable until this release contains computed SPECTER2 evidence."
                     : undefined
                 }
-                onClick={() => setMode(item)}
+                onClick={() => changeEvidenceMode(item)}
               >
                 {item === "cskl" ? "C-SKL" : item === "specter2" ? "SPECTER2" : "Agreement"}
               </button>
@@ -482,12 +795,67 @@ export function AtlasExplorer({
             </div>
             <label className="select-field">
               <span>Group datasets by</span>
-              <select value={clusterMode} onChange={(event) => setClusterMode(event.target.value as ClusterMode)}>
+              <select value={clusterMode} onChange={(event) => changeClusterMode(event.target.value as ClusterMode)}>
                 <option value="topology">C-SKL topology</option>
                 <option value="tissue">Anatomical system</option>
-                <option value="disease">Disease family</option>
+                <option value="disease">Clinical family</option>
               </select>
             </label>
+            <div className="encoding-field">
+              <span>Node color</span>
+              <div className="encoding-switcher" role="group" aria-label="Node color">
+                <button
+                  type="button"
+                  className={nodeColorMode === "tissue" ? "active" : ""}
+                  aria-pressed={nodeColorMode === "tissue"}
+                  onClick={() => setNodeColorMode("tissue")}
+                >
+                  Anatomy
+                </button>
+                <button
+                  type="button"
+                  className={nodeColorMode === "disease" ? "active" : ""}
+                  aria-pressed={nodeColorMode === "disease"}
+                  onClick={() => setNodeColorMode("disease")}
+                >
+                  Clinical family
+                </button>
+              </div>
+              <small>Shape always keeps a broad anatomical context for color-independent reading.</small>
+            </div>
+            <details className="family-key">
+              <summary>Clinical family key <span>{diseaseFamilyCounts.length}</span></summary>
+              <div>
+                {diseaseFamilyCounts.map(([family, count]) => (
+                  <span key={family}>
+                    <i style={{ background: diseaseFamilyColor(family) }} />
+                    <b>{family}</b>
+                    <small>{count}</small>
+                  </span>
+                ))}
+              </div>
+              <p>Broad display groups from concordant labels; no ICD code is assigned.</p>
+            </details>
+            <label className="range-field edge-q-field">
+              <span>
+                Maximum global BH q-value <strong>≤ {formatProbability(maxQValue)}</strong>
+              </span>
+              <input
+                type="range"
+                min="0"
+                max={EDGE_Q_THRESHOLDS.length - 1}
+                step="1"
+                value={edgeQStep}
+                aria-label="Maximum global BH q-value"
+                aria-valuetext={`q-value at most ${formatProbability(maxQValue)}, ${candidateEdges.length} relationships retained`}
+                onChange={(event) => changeEdgeQStep(Number(event.target.value))}
+              />
+              <small className="range-ends"><span>Fewer, strongest</span><span>More links</span></small>
+              <em>{candidateEdges.length.toLocaleString()} of {allCandidateEdges.length.toLocaleString()} published links under current dataset filters</em>
+            </label>
+            <p className="facet-note">
+              This changes the visible sparse graph only; it does not reveal unpublished pairs.
+            </p>
           </div>
 
           <div className="control-section">
@@ -536,7 +904,10 @@ export function AtlasExplorer({
                       })
                     }
                   />
-                  <i style={{ background: tissueColor(tissueSystem) }} />
+                  <i
+                    className={`node-glyph shape-${tissueShape(tissueSystem)}`}
+                    style={{ background: tissueColor(tissueSystem) }}
+                  />
                   <span>{tissueSystem}</span>
                 </label>
               ))}
@@ -550,12 +921,14 @@ export function AtlasExplorer({
               </span>
               <input
                 type="range"
-                min="2"
-                max="100"
+                min="0"
+                max={SAMPLE_THRESHOLDS.length - 1}
                 step="1"
-                value={minSamples}
-                onChange={(event) => setMinSamples(Number(event.target.value))}
+                value={sampleThresholdIndex}
+                aria-valuetext={`At least ${minSamples} samples`}
+                onChange={(event) => setSampleThresholdIndex(Number(event.target.value))}
               />
+              <small className="range-ends"><span>2</span><span>2,000</span></small>
             </label>
           </div>
 
@@ -572,7 +945,7 @@ export function AtlasExplorer({
                   className={selectedNodeIds.has(node.id) ? "selected" : ""}
                   onClick={(event) => setSingleNode(node.id, event.shiftKey || event.ctrlKey || event.metaKey)}
                 >
-                  <i style={{ background: tissueColor(nodeTissueSystem(node)) }} />
+                  <NodeGlyph node={node} colorMode={nodeColorMode} />
                   <span><strong>{node.id}</strong><small>{node.disease}</small></span>
                   <em>{node.samples}</em>
                 </button>
@@ -582,6 +955,14 @@ export function AtlasExplorer({
           </div>
         </div>
       </aside>
+      {controlsOpen && (
+        <button
+          type="button"
+          className="mobile-panel-backdrop"
+          aria-label="Close graph controls"
+          onClick={closeControls}
+        />
+      )}
 
       <section className="map-panel" aria-label="Dataset similarity map">
         <div className="map-toolbar">
@@ -595,33 +976,69 @@ export function AtlasExplorer({
             <span className="freshness">
               <i />
               {graph.publishedAt
-                ? `published ${new Date(graph.publishedAt).toLocaleDateString()}`
+                ? `published ${formatPublishedDate(graph.publishedAt)}`
                 : "publication date unavailable"}
             </span>
           </div>
         </div>
+        {focusedGroup && (
+          <section
+            className="cluster-focus-card"
+            aria-label={`Focused cluster: ${focusedGroup.label}`}
+            aria-live="polite"
+          >
+            <div>
+              <span>Focused {focusedGroup.mode === "topology" ? "cluster" : "group"}</span>
+              <strong>{focusedGroup.label}</strong>
+              <small>
+                {baseNodes.length.toLocaleString()} dataset{baseNodes.length === 1 ? "" : "s"} · {visibleEdges.length.toLocaleString()} visible relationships
+              </small>
+            </div>
+            <button ref={showAllButtonRef} type="button" onClick={leaveFocusedGroup}>
+              Show all <span aria-hidden="true">×</span>
+            </button>
+            <label className="cluster-mobile-threshold">
+              <span>q ≤ {formatProbability(maxQValue)}</span>
+              <input
+                type="range"
+                min="0"
+                max={EDGE_Q_THRESHOLDS.length - 1}
+                step="1"
+                value={edgeQStep}
+                aria-label="Maximum global BH q-value in focused cluster"
+                aria-valuetext={`q-value at most ${formatProbability(maxQValue)}`}
+                onChange={(event) => changeEdgeQStep(Number(event.target.value))}
+              />
+            </label>
+          </section>
+        )}
         <GraphCanvas
+          key={`${clusterMode}:${focusedGroup?.id ?? "overview"}`}
           nodes={graphNodes}
           edges={visibleEdges}
           mode={mode}
           clusterMode={clusterMode}
+          nodeColorMode={nodeColorMode}
+          focusedGroupId={focusedGroup?.id}
+          topOverlayInset={focusedGroup ? 148 : 66}
           selectedNodeIds={selectedNodeIds}
           selectedEdgeId={selectedEdgeId}
           onSelectNode={setSingleNode}
           onSelectEdge={selectEdge}
+          onFocusGroup={focusGroup}
           onClear={clearSelection}
         />
         <div className="map-legend" aria-label="Graph legend">
           <div className="legend-block">
             <span className="legend-title">Node</span>
             <span><i className="legend-size small" /> sample count</span>
-            <span><i className="legend-color" /> anatomical system</span>
-            <span><i className="legend-shape" /> disease family</span>
+            <span><i className="legend-color" /> {nodeColorMode === "tissue" ? "anatomical system" : "clinical family"}</span>
+            <span><i className="legend-shape" /> anatomical context</span>
           </div>
           <div className="legend-block">
             <span className="legend-title">Relationship</span>
             <span><i className="legend-line strong" /> stronger evidence</span>
-            <span><i className="legend-line dotted" /> overlap-qualified</span>
+            <span><i className="legend-line dotted" /> major / exact overlap</span>
             <span><i className="legend-dot" /> computed SPECTER2 available</span>
           </div>
           <span className="preview-disclosure" title={graph.note}>
@@ -635,7 +1052,7 @@ export function AtlasExplorer({
           draft={draftQuery}
           setDraft={setDraftQuery}
           resultCount={draftQueryResultCount}
-          candidateCount={candidateEdges.length}
+          candidateCount={allCandidateEdges.length}
           valid={draftQueryValid}
           activeState={
             !activeQuery
@@ -661,11 +1078,17 @@ export function AtlasExplorer({
             clearSelection();
           }}
           onQuickLens={applyLens}
-          onClose={() => setQueryOpen(false)}
+          onClose={closeQuery}
+          panelRef={queryPanelRef}
         />
       )}
 
-      <aside className={`inspector ${inspectorOpen ? "open" : ""}`} aria-label="Evidence inspector">
+      <aside
+        className={`inspector ${inspectorOpen ? "open" : ""}`}
+        aria-label="Evidence inspector"
+        aria-hidden={!inspectorOpen}
+        inert={inspectorOpen ? undefined : true}
+      >
         <button type="button" className="inspector-close" aria-label="Close evidence inspector" onClick={() => setInspectorOpen(false)}>
           ×
         </button>
@@ -676,15 +1099,23 @@ export function AtlasExplorer({
             aiState={aiState}
             onAskAi={askAi}
             synthesisAvailable={Boolean(synthesisEndpoint)}
+            colorMode={nodeColorMode}
           />
         ) : primaryNode ? (
-          <NodeInspector node={primaryNode} connections={nodeConnections} nodeMap={nodeMap} onSelectEdge={selectEdge} />
+          <NodeInspector
+            node={primaryNode}
+            connections={nodeConnections}
+            nodeMap={nodeMap}
+            onSelectEdge={selectEdge}
+            colorMode={nodeColorMode}
+          />
         ) : selectedNodes.length > 1 ? (
           <SelectionInspector
             nodes={selectedNodes}
             aiState={aiState}
             onAskAi={askAi}
             synthesisAvailable={Boolean(synthesisEndpoint)}
+            colorMode={nodeColorMode}
           />
         ) : (
           <WelcomeInspector />
@@ -695,6 +1126,8 @@ export function AtlasExplorer({
           Evidence panel
         </button>
       )}
+      </div>
+      <AtlasIntro open={introOpen} onDismiss={dismissIntro} />
     </main>
   );
 }
@@ -717,6 +1150,7 @@ function DiscoveryQueryPanel({
   onReset,
   onQuickLens,
   onClose,
+  panelRef,
 }: {
   draft: DiscoveryQuery;
   setDraft: (query: DiscoveryQuery) => void;
@@ -731,10 +1165,23 @@ function DiscoveryQueryPanel({
   onReset: () => void;
   onQuickLens: (lens: Lens) => void;
   onClose: () => void;
+  panelRef: RefObject<HTMLElement | null>;
 }) {
   const expression = JSON.stringify(discoveryQueryAst(draft), null, 2);
   return (
-    <section className="query-popover" role="dialog" aria-label="Discovery query builder">
+    <section
+      ref={panelRef}
+      className="query-popover"
+      role="dialog"
+      aria-label="Discovery query builder"
+      tabIndex={-1}
+      onKeyDown={(event) => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        event.stopPropagation();
+        onClose();
+      }}
+    >
       <div className="query-header">
         <div>
           <span className="panel-eyebrow">Published-graph query</span>
@@ -744,7 +1191,8 @@ function DiscoveryQueryPanel({
       </div>
       <p>
         Every filled rule must match. Results are evaluated locally against this immutable
-        snapshot and the active dataset filters.
+        snapshot and the active dataset filters. The map&apos;s separate q-value slider can narrow
+        what is drawn without changing this query.
       </p>
 
       <form
@@ -940,12 +1388,14 @@ function EdgeInspector({
   aiState,
   onAskAi,
   synthesisAvailable,
+  colorMode,
 }: {
   edge: GraphEdge;
   nodeMap: Map<string, GraphNode>;
   aiState: AiState;
   onAskAi: () => void;
   synthesisAvailable: boolean;
+  colorMode: NodeColorMode;
 }) {
   const source = nodeMap.get(edge.source);
   const target = nodeMap.get(edge.target);
@@ -982,14 +1432,14 @@ function EdgeInspector({
         <div><span>C-SKL distance</span><strong>{formatCskl(edge.cskl)}</strong><small>lower is closer</small></div>
         <div>
           <span>Global BH q-value</span>
-          <strong>{edge.qValue.toFixed(3)}</strong>
+          <strong>{formatProbability(edge.qValue)}</strong>
           <small>
             {edge.independentQValue === undefined
               ? "overlap-qualified; no independent q"
-              : `independent q ${edge.independentQValue.toFixed(3)}`}
+              : `independent q ${formatProbability(edge.independentQValue)}`}
           </small>
         </div>
-        <div><span>SPECTER2</span><strong>{edge.specter2?.toFixed(2) ?? "—"}</strong><small>{textStatus}</small></div>
+        <div><span>SPECTER2</span><strong>{textScore?.toFixed(2) ?? "—"}</strong><small>{textStatus}</small></div>
         <div><span>Cross-modal</span><strong className={agreement ? "positive" : "neutral"}>{textScore === undefined ? "Unavailable" : agreement ? "High agreement" : "Mixed evidence"}</strong><small>not validation</small></div>
       </div>
 
@@ -1055,7 +1505,7 @@ function EdgeInspector({
         <div className="pair-context">
           {[source, target].map((node) => node && (
             <a key={node.id} href={`https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=${node.id}`} target="_blank" rel="noreferrer">
-              <i style={{ background: tissueColor(nodeTissueSystem(node)) }} />
+              <NodeGlyph node={node} colorMode={colorMode} />
               <span><strong>{node.id}</strong><small>{node.tissue} · {node.samples} samples</small></span>
               <b>↗</b>
             </a>
@@ -1078,11 +1528,13 @@ function NodeInspector({
   connections,
   nodeMap,
   onSelectEdge,
+  colorMode,
 }: {
   node: GraphNode;
   connections: GraphEdge[];
   nodeMap: Map<string, GraphNode>;
   onSelectEdge: (id: string) => void;
+  colorMode: NodeColorMode;
 }) {
   const systemValidation = tissueSystemPresentation(node);
   const diseaseValidation = semanticLabelPresentation(node.diseaseLabelSource);
@@ -1090,7 +1542,7 @@ function NodeInspector({
     <div className="inspector-content">
       <span className="panel-eyebrow">Dataset</span>
       <div className="dataset-title-row">
-        <i style={{ background: tissueColor(nodeTissueSystem(node)) }} />
+        <NodeGlyph node={node} colorMode={colorMode} />
         <div><h2>{node.id}</h2><p>{node.title}</p></div>
       </div>
       <SourceBadge node={node} />
@@ -1112,7 +1564,11 @@ function NodeInspector({
             {diseaseValidation.label}
           </strong>
         </div>
-        <div><span>Disease family</span><strong>{node.diseaseFamily} · {diseaseShapeLabel[node.diseaseFamily]}</strong></div>
+        <div>
+          <span>Clinical family</span>
+          <strong title="Broad display grouping; not an assigned diagnosis code">{node.diseaseFamily}</strong>
+        </div>
+        <div><span>Family facet</span><strong>{node.diseaseFamilyVersion ?? "display version unavailable"}</strong></div>
         <div><span>Samples</span><strong>{node.samples}</strong></div>
         <div><span>Platform</span><strong>{node.platform}</strong></div>
         <div><span>Organism</span><strong>{node.organism}</strong></div>
@@ -1166,7 +1622,9 @@ function NodeInspector({
             const other = nodeMap.get(endpoint(edge, node.id));
             return (
               <button type="button" key={edge.id} onClick={() => onSelectEdge(edge.id)}>
-                <i style={{ background: other ? tissueColor(nodeTissueSystem(other)) : "#9ba7ba" }} />
+                {other
+                  ? <NodeGlyph node={other} colorMode={colorMode} />
+                  : <i className="node-glyph shape-cross" style={{ background: "#9ba7ba" }} />}
                 <span><strong>{other?.id}</strong><small>{other?.disease}</small></span>
                 <em>{formatCskl(edge.cskl)}</em>
               </button>
@@ -1186,11 +1644,13 @@ function SelectionInspector({
   aiState,
   onAskAi,
   synthesisAvailable,
+  colorMode,
 }: {
   nodes: GraphNode[];
   aiState: AiState;
   onAskAi: () => void;
   synthesisAvailable: boolean;
+  colorMode: NodeColorMode;
 }) {
   const tissueSystems = [...new Set(nodes.map((node) => nodeTissueSystem(node)))];
   const diseases = [...new Set(nodes.map((node) => node.disease))];
@@ -1201,7 +1661,7 @@ function SelectionInspector({
       <p className="inspector-subtitle">Shift-click nodes or dataset rows to refine this group.</p>
       <div className="selection-stack">
         {nodes.map((node) => (
-          <div key={node.id}><i style={{ background: tissueColor(nodeTissueSystem(node)) }} /><span><strong>{node.id}</strong><small>{node.disease}</small></span></div>
+          <div key={node.id}><NodeGlyph node={node} colorMode={colorMode} /><span><strong>{node.id}</strong><small>{node.disease}</small></span></div>
         ))}
       </div>
       <div className="selection-summary">
@@ -1261,7 +1721,7 @@ function WelcomeInspector() {
       <h2>Follow the biology, not the plumbing.</h2>
       <p>Select a dataset, a relationship, or shift-click a group to inspect the evidence behind the map.</p>
       <div className="how-to-read">
-        <div><b>1</b><span><strong>Scan tissue neighborhoods</strong><small>Color reveals biological context; shape shows disease family.</small></span></div>
+        <div><b>1</b><span><strong>Scan biological neighborhoods</strong><small>Color shows the chosen facet; shape keeps anatomical context.</small></span></div>
         <div><b>2</b><span><strong>Open a relationship</strong><small>See significance, gene-driver concentration, semantic agreement, and overlap warnings.</small></span></div>
         <div><b>3</b><span><strong>Ask a discovery question</strong><small>Query across metadata, topology, genes, pathways, and provenance.</small></span></div>
       </div>

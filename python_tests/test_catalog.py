@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 
 import pytest
-from cskl_atlas.catalog import Catalog, pair_family_hash
+from cskl_atlas.catalog import Catalog, pair_family_hash, stable_id
 from cskl_atlas.query_engine import (
     QueryContractError,
     UnsupportedQueryError,
@@ -241,6 +242,246 @@ def test_disk_backed_bh_and_atomic_snapshot_publish(tmp_path):
     graph = catalog.graph_payload(snapshot_id=snapshot, q_max=0.05)
     assert len(graph["nodes"]) == 3
     assert len(graph["edges"]) == 3
+
+
+def test_graph_payload_reads_q_value_from_the_companion_independent_stratum(tmp_path):
+    catalog = Catalog(tmp_path / "atlas.sqlite")
+    catalog.initialize()
+    version_a, version_b = (
+        version(catalog, accession) for accession in ("GSE1", "GSE2")
+    )
+    catalog.record_pair_scores([(version_a, version_b, "algo-v1", 1.0)])
+    with catalog.reader() as connection:
+        pair_id = str(connection.execute("SELECT pair_id FROM pair_scores").fetchone()[0])
+
+    base_stratum = "human:expression:GPL570:feature-v1"
+    global_release = catalog.stage_calibration(
+        stratum=base_stratum,
+        mode="exact",
+        pool_hash="pool-v1",
+        parameter_hash="params-global",
+        algorithm_hash="algo-v1",
+        family_hash=pair_family_hash([pair_id]),
+        expected_pair_count=1,
+        manifest={"run_id": "release-v1", "family": "global"},
+    )
+    catalog.record_pvalues(global_release, [(pair_id, 0.01)])
+    catalog.finalize_bh(global_release)
+
+    independent_release = catalog.stage_calibration(
+        stratum=f"{base_stratum}:independent",
+        mode="exact",
+        pool_hash="pool-v1",
+        parameter_hash="params-independent",
+        algorithm_hash="algo-v1",
+        family_hash=pair_family_hash([pair_id]),
+        expected_pair_count=1,
+        manifest={"run_id": "release-v1", "family": "independent"},
+    )
+    catalog.record_pvalues(independent_release, [(pair_id, 0.2)])
+    catalog.finalize_bh(independent_release)
+
+    unrelated_independent_release = catalog.stage_calibration(
+        stratum=f"{base_stratum}:independent",
+        mode="exact",
+        pool_hash="pool-v1",
+        parameter_hash="params-independent-unrelated",
+        algorithm_hash="algo-v1",
+        family_hash=pair_family_hash([pair_id]),
+        expected_pair_count=1,
+        manifest={"run_id": "release-unrelated", "family": "independent"},
+    )
+    catalog.record_pvalues(unrelated_independent_release, [(pair_id, 0.6)])
+    catalog.finalize_bh(unrelated_independent_release)
+
+    manifest_uri, manifest_checksum = graph_manifest(catalog, tmp_path, "independent-q")
+    snapshot = catalog.stage_snapshot(
+        calibration_id=global_release,
+        stratum=base_stratum,
+        policy_hash="policy-v1",
+        layout_version="layout-v1",
+        manifest_uri=manifest_uri,
+        manifest_checksum=manifest_checksum,
+        datasets=[
+            (version_a, 0.1, 0.2, "c1"),
+            (version_b, 0.3, 0.4, "c1"),
+        ],
+    )
+    assert snapshot == stable_id(
+        "snapshot",
+        global_release,
+        base_stratum,
+        "policy-v1",
+        "layout-v1",
+        manifest_uri,
+        manifest_checksum,
+        "",
+        independent_release,
+    )
+    catalog.publish_snapshot(snapshot)
+
+    edge = catalog.graph_payload(snapshot_id=snapshot)["edges"][0]
+    assert edge["q_value"] == pytest.approx(0.01)
+    assert edge["independent_q_value"] == pytest.approx(0.2)
+
+    newer_independent_release = catalog.stage_calibration(
+        stratum=f"{base_stratum}:independent",
+        mode="exact",
+        pool_hash="pool-v1",
+        parameter_hash="params-independent-v2",
+        algorithm_hash="algo-v1",
+        family_hash=pair_family_hash([pair_id]),
+        expected_pair_count=1,
+        manifest={"run_id": "release-v1", "family": "independent"},
+    )
+    catalog.record_pvalues(newer_independent_release, [(pair_id, 0.8)])
+    catalog.finalize_bh(newer_independent_release)
+
+    frozen = catalog.graph_payload(snapshot_id=snapshot)
+    assert frozen["snapshot"]["independent_calibration_id"] == independent_release
+    assert frozen["edges"][0]["independent_q_value"] == pytest.approx(0.2)
+    query_result = execute_query(
+        catalog,
+        snapshot_id=snapshot,
+        query={"edge.independent": {"eq": True}},
+    )
+    assert [edge["pair_id"] for edge in query_result["edges"]] == [pair_id]
+    assert query_result["provenance"]["independent_calibration_id"] == independent_release
+
+    rebound_snapshot = catalog.stage_snapshot(
+        calibration_id=global_release,
+        independent_calibration_id=newer_independent_release,
+        stratum=base_stratum,
+        policy_hash="policy-v1",
+        layout_version="layout-v1",
+        manifest_uri=manifest_uri,
+        manifest_checksum=manifest_checksum,
+        datasets=[
+            (version_a, 0.1, 0.2, "c1"),
+            (version_b, 0.3, 0.4, "c1"),
+        ],
+    )
+    assert rebound_snapshot != snapshot
+
+    # A schema-v4 catalog had no binding column. Its one-time migration must
+    # recover the companion that existed when the snapshot became publishable,
+    # rather than whichever release happens to be newest during migration, and
+    # it must not rewrite the snapshot's legacy identity.
+    legacy_snapshot_id = stable_id(
+        "snapshot",
+        global_release,
+        base_stratum,
+        "policy-v1",
+        "layout-v1",
+        manifest_uri,
+        manifest_checksum,
+        "",
+    )
+    assert legacy_snapshot_id != snapshot
+    with sqlite3.connect(catalog.path) as connection:
+        connection.execute(
+            "UPDATE graph_snapshot_datasets SET snapshot_id=? WHERE snapshot_id=?",
+            (legacy_snapshot_id, snapshot),
+        )
+        connection.execute(
+            "UPDATE graph_snapshot_edges SET snapshot_id=? WHERE snapshot_id=?",
+            (legacy_snapshot_id, snapshot),
+        )
+        connection.execute(
+            "UPDATE snapshot_events SET snapshot_id=? WHERE snapshot_id=?",
+            (legacy_snapshot_id, snapshot),
+        )
+        connection.execute(
+            "UPDATE settings SET value=? WHERE value=?",
+            (legacy_snapshot_id, snapshot),
+        )
+        connection.execute(
+            """UPDATE graph_snapshots
+               SET snapshot_id=?,independent_calibration_id=NULL WHERE snapshot_id=?""",
+            (legacy_snapshot_id, snapshot),
+        )
+        connection.execute(
+            "UPDATE catalog_meta SET value='4' WHERE key='schema_version'"
+        )
+    catalog.initialize()
+    migrated = catalog.graph_payload(snapshot_id=legacy_snapshot_id)
+    assert migrated["snapshot"]["snapshot_id"] == legacy_snapshot_id
+    assert migrated["snapshot"]["independent_calibration_id"] == independent_release
+    assert migrated["edges"][0]["independent_q_value"] == pytest.approx(0.2)
+
+
+def test_snapshot_without_run_id_requires_an_explicit_independent_companion(tmp_path):
+    catalog = Catalog(tmp_path / "atlas.sqlite")
+    catalog.initialize()
+    version_a, version_b = (
+        version(catalog, accession) for accession in ("GSE1", "GSE2")
+    )
+    catalog.record_pair_scores([(version_a, version_b, "algo-v1", 1.0)])
+    with catalog.reader() as connection:
+        pair_id = str(connection.execute("SELECT pair_id FROM pair_scores").fetchone()[0])
+    stratum = "human:expression:GPL570:unlabeled"
+    primary = catalog.stage_calibration(
+        stratum=stratum,
+        mode="exact",
+        pool_hash="pool-v1",
+        parameter_hash="params-global",
+        algorithm_hash="algo-v1",
+        family_hash=pair_family_hash([pair_id]),
+        expected_pair_count=1,
+        manifest={},
+    )
+    catalog.record_pvalues(primary, [(pair_id, 0.01)])
+    catalog.finalize_bh(primary)
+    independent = catalog.stage_calibration(
+        stratum=f"{stratum}:independent",
+        mode="exact",
+        pool_hash="pool-v1",
+        parameter_hash="params-independent",
+        algorithm_hash="algo-v1",
+        family_hash=pair_family_hash([pair_id]),
+        expected_pair_count=1,
+        manifest={},
+    )
+    catalog.record_pvalues(independent, [(pair_id, 0.2)])
+    catalog.finalize_bh(independent)
+    manifest_uri, manifest_checksum = graph_manifest(catalog, tmp_path, "unlabeled")
+    snapshot_arguments = {
+        "calibration_id": primary,
+        "stratum": stratum,
+        "policy_hash": "policy-v1",
+        "layout_version": "layout-v1",
+        "manifest_uri": manifest_uri,
+        "manifest_checksum": manifest_checksum,
+        "datasets": [
+            (version_a, 0.1, 0.2, "c1"),
+            (version_b, 0.3, 0.4, "c1"),
+        ],
+    }
+
+    unbound_snapshot = catalog.stage_snapshot(**snapshot_arguments)
+    catalog.publish_snapshot(unbound_snapshot)
+    assert catalog.graph_payload(snapshot_id=unbound_snapshot)["snapshot"][
+        "independent_calibration_id"
+    ] is None
+    with pytest.raises(UnsupportedQueryError, match="bound independent calibration"):
+        execute_query(
+            catalog,
+            snapshot_id=unbound_snapshot,
+            query={"edge.independent": {"eq": True}},
+        )
+
+    explicit_snapshot = catalog.stage_snapshot(
+        **snapshot_arguments,
+        independent_calibration_id=independent,
+    )
+    assert explicit_snapshot != unbound_snapshot
+    with catalog.reader() as connection:
+        binding = connection.execute(
+            """SELECT independent_calibration_id FROM graph_snapshots
+               WHERE snapshot_id=?""",
+            (explicit_snapshot,),
+        ).fetchone()[0]
+    assert binding == independent
 
 
 def test_snapshot_diff_is_logical_bounded_deterministic_and_provenanced(tmp_path):

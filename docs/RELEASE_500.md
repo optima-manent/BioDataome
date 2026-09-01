@@ -69,8 +69,17 @@ collision projection. At the reference 1.5 aspect ratio:
 | Communities | 39 |
 | Mean membership NMI over 10 seeded runs | 0.993514 |
 
-The browser recomputes view-specific packing for topology, anatomy, and disease
-lenses while keeping the versioned release coordinates as its source.
+The browser recomputes view-specific packing for C-SKL topology, anatomical
+system, and clinical family views while keeping the versioned release
+coordinates as its source. Cluster labels can focus one group at a time, and a
+global BH q-value control can narrow the 5,344 published edges without changing
+the release or exposing pairs outside the sparse graph.
+
+Color shows anatomy by default and can switch to a broad clinical-family facet;
+shape keeps a coarse anatomical context. Clinical families are display-only,
+derived from concordant labels, and never assign ICD codes. Unreviewed labels
+remain visibly unreviewed. These browser-level views do not alter the frozen
+graph checksum.
 
 ## Validation status
 

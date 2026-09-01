@@ -36,8 +36,13 @@ dataset versions.
   validation.
 - Shared samples never delete a relationship. Exact or major overlap is shown
   with a dotted edge and cannot be described as independent replication.
-- Node color encodes a broad anatomical system, shape encodes disease family,
-  and size encodes sample count.
+- Node color shows anatomy by default and can switch to a broad, review-aware
+  clinical family. Shape keeps a coarse anatomical context, and size encodes
+  sample count.
+- Cluster and group labels are controls: open one to focus its datasets, then
+  return to the whole map with **Show all**. The global BH q-value slider trims
+  the published links from strongest to broadest support without revealing
+  pairs outside the frozen sparse graph.
 - Selecting an edge exposes calibration, overlap, SPECTER2, B(k)/W(k), Reactome,
   and provenance evidence when those artifacts have been computed.
 - Search is a quick metadata filter. The discovery query builder applies
@@ -46,6 +51,10 @@ dataset versions.
 
 The map is an evidence index, not a causal model. Similarity may reflect shared
 biology, tissue, protocol, batch effects, reused samples, or other confounding.
+Clinical families are display aids built from concordant labels. They do not
+assign ICD codes, and labels that have not been reviewed stay visibly
+unreviewed. A short visual primer explains these cues while the snapshot loads;
+the **?** button opens it again later.
 
 ## Frozen 500-study release
 

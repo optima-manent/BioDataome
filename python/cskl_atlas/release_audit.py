@@ -18,6 +18,14 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _artifact_checksum_matches(uri: str, checksum: str) -> bool:
+    try:
+        path = Path(uri).resolve()
+        return path.is_file() and _sha256(path) == checksum
+    except (OSError, ValueError):
+        return False
+
+
 def audit_release(
     catalog: Catalog,
     *,
@@ -98,21 +106,39 @@ def audit_release(
                 "SELECT COUNT(*) FROM graph_snapshot_edges WHERE snapshot_id=?", (snapshot_id,)
             ).fetchone()[0]
         )
-        explained_count = int(
-            connection.execute(
-                """SELECT COUNT(DISTINCT se.pair_id)
-                   FROM graph_snapshot_edges se
-                   JOIN artifacts a ON a.kind='edge_explanation'
-                    AND json_extract(a.manifest_json,'$.pair_id')=se.pair_id
-                   WHERE se.snapshot_id=?""",
+        snapshot_accessions = tuple(
+            str(row["accession"])
+            for row in connection.execute(
+                """SELECT DISTINCT d.accession
+                   FROM graph_snapshot_datasets g
+                   JOIN dataset_versions v ON v.version_id=g.version_id
+                   JOIN datasets d ON d.dataset_uid=v.dataset_uid
+                   WHERE g.snapshot_id=? ORDER BY d.accession""",
                 (snapshot_id,),
-            ).fetchone()[0]
+            )
         )
+        explainer_artifacts = connection.execute(
+            """SELECT se.pair_id,a.uri,a.checksum
+               FROM graph_snapshot_edges se
+               JOIN artifacts a ON a.kind='edge_explanation'
+                AND json_extract(a.manifest_json,'$.pair_id')=se.pair_id
+               WHERE se.snapshot_id=? ORDER BY se.pair_id,a.created_at DESC""",
+            (snapshot_id,),
+        ).fetchall()
         dead_jobs = int(
             connection.execute(
                 "SELECT COUNT(*) FROM jobs WHERE status IN ('dead','running','retry')"
             ).fetchone()[0]
         )
+
+    valid_explained_pairs: set[str] = set()
+    invalid_explainer_artifacts = 0
+    for artifact in explainer_artifacts:
+        if _artifact_checksum_matches(str(artifact["uri"]), str(artifact["checksum"])):
+            valid_explained_pairs.add(str(artifact["pair_id"]))
+        else:
+            invalid_explainer_artifacts += 1
+    explained_count = len(valid_explained_pairs)
 
     check(
         "manuscript_null_release",
@@ -139,6 +165,8 @@ def audit_release(
             "explained_published_edges": explained_count,
             "published_edges": edge_count,
             "coverage": explained_count / edge_count if edge_count else 0,
+            "cataloged_explainer_artifacts": len(explainer_artifacts),
+            "missing_or_checksum_invalid_artifacts": invalid_explainer_artifacts,
             "policy": "required only for a manuscript claiming all-edge mechanism coverage",
         },
         paper_only=True,
@@ -169,18 +197,33 @@ def audit_release(
         missing_scope = 0
         incomplete = 0
         total = 0
-        for path in records.glob("GSE*.json"):
+        missing_accessions: list[str] = []
+        for accession in snapshot_accessions:
+            path = records / f"{accession}.json"
+            if not path.is_file():
+                missing_accessions.append(accession)
+                continue
             total += 1
-            record = json.loads(path.read_text(encoding="utf-8"))
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                incomplete += 1
+                continue
             if record.get("sample_metadata_scope") != "matrix_cohort":
                 missing_scope += 1
             if record.get("sample_metadata_status") != "complete":
                 incomplete += 1
         check(
             "cohort_specific_geo_metadata",
-            total > 0 and missing_scope == 0 and incomplete == 0,
+            bool(snapshot_accessions)
+            and not missing_accessions
+            and missing_scope == 0
+            and incomplete == 0,
             {
+                "snapshot_accessions": len(snapshot_accessions),
                 "records": total,
+                "missing": len(missing_accessions),
+                "missing_accessions": missing_accessions,
                 "not_matrix_cohort": missing_scope,
                 "incomplete": incomplete,
             },

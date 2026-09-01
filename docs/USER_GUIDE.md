@@ -7,14 +7,21 @@ worth investigating next?
 ## Read the map
 
 - **Node:** one immutable dataset version.
-- **Node color:** broad anatomical system.
-- **Node shape:** disease family.
+- **Node color:** broad anatomical system by default, with an optional clinical
+  family view.
+- **Node shape:** coarse anatomical or tissue context, so the map remains
+  readable without relying on color alone.
 - **Node size:** sample count.
 - **Solid edge:** published relationship without major/exact sample overlap.
 - **Dotted edge:** major or exact shared-sample relationship; inspectable but not
   independent replication.
 - **Edge visibility:** strongest relationships form the overview; progressive
-  detail appears as the view is enlarged.
+  detail appears as the view is enlarged. The global BH q-value slider also
+  lets you keep fewer, stronger links or restore more of the published graph.
+
+Clinical families are broad display groups derived from concordant disease
+labels. They are useful for browsing, but they are not diagnoses and do not
+assign ICD codes. Unreviewed labels remain in an explicit unreviewed group.
 
 The raw c-SKL direction is easy to misread: lower values indicate closer
 standardized covariance structure. Percentiles in the interface reverse that
@@ -22,15 +29,25 @@ direction for display, so a higher c-SKL similarity percentile is stronger.
 
 ## Navigate
 
+- On the first visit, use the short visual primer while the published snapshot
+  prepares, then choose **Open the atlas**. The **?** button reopens the primer.
 - Drag the background to pan.
 - Use the wheel or zoom controls to change scale.
+- Select a cluster or group label to focus that part of the map. Choose **Show
+  all** or press Escape to return to the full view.
 - Select a node to open its GEO metadata, semantic-label provenance, and nearest
   published relationships.
 - Select an edge to inspect c-SKL, p/q-values, SPECTER2, shared samples, and a
   feature/pathway explanation when one has been computed.
 - Shift-select nodes to create a temporary group.
-- Switch between topology, anatomy, and disease layouts. Group labels remain in
-  screen space so they do not shrink while zooming.
+- Switch between C-SKL topology, anatomical system, and clinical family
+  layouts. Group labels remain in screen space so they do not shrink while
+  zooming. Node color can be switched separately between anatomy and clinical
+  family; shape continues to show anatomical context.
+
+The maximum global BH q-value control only filters relationships already in the
+published sparse graph. It does not recalculate q-values or reveal unpublished
+pairs from the complete calibrated family.
 
 ## Search versus discovery query
 

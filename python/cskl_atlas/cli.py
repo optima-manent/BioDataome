@@ -51,6 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     build_snapshot.add_argument("--seed", type=int, required=True)
     build_snapshot.add_argument("--stability-runs", type=int, default=5)
     build_snapshot.add_argument("--text-release-id")
+    build_snapshot.add_argument("--independent-calibration-id")
 
     publish_snapshot = commands.add_parser(
         "publish-snapshot", help="Publish one validated staged snapshot atomically."
@@ -345,6 +346,7 @@ def main(argv: list[str] | None = None) -> None:
             seed=args.seed,
             stability_runs=args.stability_runs,
             text_release_id=args.text_release_id,
+            independent_calibration_id=args.independent_calibration_id,
         )
         print(json.dumps(result, indent=2))
         return

@@ -6,11 +6,16 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .annotations import annotation_ontology_allowed
 from .catalog import Catalog, canonical_json, stable_id
-from .display_facets import TISSUE_SYSTEM_VERSION, derive_tissue_system
+from .display_facets import (
+    DISEASE_FAMILY_VERSION,
+    TISSUE_SYSTEM_VERSION,
+    derive_disease_family,
+    derive_tissue_system,
+)
 
 STATIC_GRAPH_SCHEMA = "cskl-atlas-static-graph-v3"
 
@@ -31,38 +36,6 @@ def _atomic_bytes(path: Path, value: bytes) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, path)
-
-
-def _disease_family(labels: list[str]) -> str:
-    value = " ".join(labels).casefold()
-    if any(
-        token in value
-        for token in (
-            "cancer",
-            "carcinoma",
-            "tumor",
-            "tumour",
-            "leukemia",
-            "leukaemia",
-            "lymphoma",
-            "melanoma",
-            "neoplasm",
-        )
-    ):
-        return "Oncology"
-    if any(
-        token in value
-        for token in ("smoking", "tobacco", "exposure", "exposed", "irradiation")
-    ):
-        return "Exposure"
-    if any(
-        token in value
-        for token in ("diabetes", "obesity", "obese", "metabolic", "insulin")
-    ):
-        return "Metabolic"
-    if any(token in value for token in ("healthy", "normal", "control", "reference")):
-        return "Reference"
-    return "Other"
 
 
 def _selected_annotations(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -95,6 +68,59 @@ def _frontend_explainer(value: dict[str, Any]) -> dict[str, Any]:
         "reactomeRelease": value["best_explaining"]["reactome"]["reactome_release"],
         "interpretation": value["interpretation"],
     }
+
+
+def _display_facet_versions() -> dict[str, str]:
+    return {
+        "display_facet_version": TISSUE_SYSTEM_VERSION,
+        "disease_family_version": DISEASE_FAMILY_VERSION,
+    }
+
+
+def _static_snapshot_provenance(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    frozen = {
+        key: snapshot[key]
+        for key in (
+            "snapshot_id",
+            "calibration_id",
+            "independent_calibration_id",
+            "stratum",
+            "policy_hash",
+            "layout_version",
+            "manifest_checksum",
+            "text_release_id",
+            "created_at",
+            "published_at",
+        )
+    }
+    frozen["status"] = "published"
+    return frozen
+
+
+def _static_dependency_hash(
+    *,
+    snapshot_manifest_checksum: str,
+    independent_calibration_id: str | None,
+    metadata_hashes: list[str],
+    explanation_hashes: list[str],
+    annotation_hash: str,
+    ontology_audit_hash: str | None,
+) -> str:
+    return hashlib.sha256(
+        canonical_json(
+            {
+                "schema": STATIC_GRAPH_SCHEMA,
+                "producer_checksum": _sha256_path(Path(__file__)),
+                "snapshot_manifest_checksum": snapshot_manifest_checksum,
+                "independent_calibration_id": independent_calibration_id,
+                "metadata_hashes": sorted(metadata_hashes),
+                "explanation_hashes": sorted(explanation_hashes),
+                "annotation_hash": annotation_hash,
+                "ontology_audit_hash": ontology_audit_hash,
+                **_display_facet_versions(),
+            }
+        ).encode()
+    ).hexdigest()
 
 
 def export_static_graph(
@@ -274,7 +300,8 @@ def export_static_graph(
                 if validated_disease_labels
                 else "unvalidated_or_missing"
             ),
-            "disease_family": _disease_family(validated_disease_labels),
+            "disease_family": derive_disease_family(validated_disease_labels),
+            "disease_family_version": DISEASE_FAMILY_VERSION,
             "annotation_source": annotation_source,
             "annotation_confidence": annotation_confidence,
             "annotation_state": "review_required" if review_required else "accepted_or_structured",
@@ -322,24 +349,11 @@ def export_static_graph(
             edge["explainer"] = explanations[edge["pair_id"]]
             attached_explanation_hashes.append(explanation_checksums[edge["pair_id"]])
 
-    payload["snapshot"] = {
-        key: snapshot[key]
-        for key in (
-            "snapshot_id",
-            "calibration_id",
-            "stratum",
-            "policy_hash",
-            "layout_version",
-            "manifest_checksum",
-            "text_release_id",
-            "status",
-            "created_at",
-            "published_at",
-        )
-    }
+    payload["snapshot"] = _static_snapshot_provenance(snapshot)
     payload["release_policy"] = {
         "primary_q_family": "global all-pairs Benjamini-Hochberg",
         "independent_q_family": "pairs with no literal shared sample",
+        "independent_calibration_id": snapshot["independent_calibration_id"],
         "q_threshold": 0.05,
         "overlap_display": "exact and major overlap are dotted; all remain inspectable",
         "major_overlap_coefficient": 0.5,
@@ -349,7 +363,7 @@ def export_static_graph(
         "community_seed": 1729,
         "layout_algorithm": layout_quality.get("algorithm", snapshot["layout_version"]),
         "layout_quality": layout_quality,
-        "display_facet_version": TISSUE_SYSTEM_VERSION,
+        **_display_facet_versions(),
         "calibration_mode": calibration["mode"],
         "null_bootstrap_count": calibration_manifest.get("B"),
         "null_grid": grid,
@@ -367,20 +381,14 @@ def export_static_graph(
         },
         "edge_rendering": "semantic zoom: strongest per-node backbone first, all release links by 210% zoom",
     }
-    dependency_hash = hashlib.sha256(
-        canonical_json(
-            {
-                "schema": STATIC_GRAPH_SCHEMA,
-                "producer_checksum": _sha256_path(Path(__file__)),
-                "snapshot_manifest_checksum": snapshot["manifest_checksum"],
-                "metadata_hashes": sorted(metadata_hashes),
-                "explanation_hashes": sorted(attached_explanation_hashes),
-                "annotation_hash": annotation_hash,
-                "ontology_audit_hash": ontology_audit_hash,
-                "display_facet_version": TISSUE_SYSTEM_VERSION,
-            }
-        ).encode()
-    ).hexdigest()
+    dependency_hash = _static_dependency_hash(
+        snapshot_manifest_checksum=snapshot["manifest_checksum"],
+        independent_calibration_id=snapshot["independent_calibration_id"],
+        metadata_hashes=metadata_hashes,
+        explanation_hashes=attached_explanation_hashes,
+        annotation_hash=annotation_hash,
+        ontology_audit_hash=ontology_audit_hash,
+    )
     encoded = canonical_json(payload).encode("utf-8")
     checksum = hashlib.sha256(encoded).hexdigest()
     destination = Path(output_path).resolve()
@@ -415,7 +423,8 @@ def export_static_graph(
         "annotation_extractors": sorted(
             {str(row["extractor_version"]) for row in annotation_rows}
         ),
-        "display_facet_version": TISSUE_SYSTEM_VERSION,
+        **_display_facet_versions(),
+        "independent_calibration_id": snapshot["independent_calibration_id"],
         "ontology_audit_hash": ontology_audit_hash,
         "ontology_paper_gate": (ontology_audit or {}).get("paper_gate", "not_run"),
         "computed_explanation_count": len(attached_explanation_hashes),

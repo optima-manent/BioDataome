@@ -1,12 +1,12 @@
 import type {
   AnnotationCandidate,
   AnnotationProvenance,
-  DiseaseFamily,
   GraphDataset,
   GraphEdge,
   GraphNode,
   Tissue,
-} from "./graph-data";
+} from "./graph-data.ts";
+import { DISEASE_FAMILY_VERSION, deriveDiseaseFamily } from "./graph-data.ts";
 import { publishedOverlapClassification } from "./evidence-policy.ts";
 
 type UnknownRecord = Record<string, unknown>;
@@ -90,14 +90,6 @@ type ApiGraph = {
   edges: ApiEdge[];
 };
 
-const diseaseFamilies = new Set<DiseaseFamily>([
-  "Oncology",
-  "Exposure",
-  "Metabolic",
-  "Reference",
-  "Other",
-]);
-
 function text(value: unknown, fallback: string) {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
 }
@@ -108,12 +100,6 @@ function finite(value: unknown, fallback: number) {
 
 function tissue(value: unknown): Tissue {
   return text(value, "Mixed / unknown");
-}
-
-function diseaseFamily(value: unknown): DiseaseFamily {
-  return typeof value === "string" && diseaseFamilies.has(value as DiseaseFamily)
-    ? (value as DiseaseFamily)
-    : "Other";
 }
 
 const annotationProvenance = new Set<AnnotationProvenance>([
@@ -166,6 +152,8 @@ export function adaptPublishedGraph(payload: ApiGraph): GraphDataset {
   const nodes: GraphNode[] = payload.nodes.map((node, index) => {
     const metadata = node.metadata && typeof node.metadata === "object" ? node.metadata : {};
     const accession = text(node.accession, node.version_id);
+    const disease = text(metadata.disease, "Unknown / not reviewed");
+    const diseaseLabelSource = text(metadata.disease_label_source, "") || undefined;
     versionToAccession.set(node.version_id, accession);
     const phase = (index / nodeCount) * Math.PI * 2;
     return {
@@ -176,9 +164,14 @@ export function adaptPublishedGraph(payload: ApiGraph): GraphDataset {
       tissue: tissue(metadata.tissue),
       tissueSystem: tissue(metadata.tissue_system ?? metadata.tissue),
       tissueSystemSource: text(metadata.tissue_system_source, "") || undefined,
-      disease: text(metadata.disease, "Unknown / not reviewed"),
-      diseaseLabelSource: text(metadata.disease_label_source, "") || undefined,
-      diseaseFamily: diseaseFamily(metadata.disease_family),
+      disease,
+      diseaseLabelSource,
+      diseaseFamily: deriveDiseaseFamily(disease, {
+        labelSource: diseaseLabelSource,
+        declaredFamily: metadata.disease_family,
+        declaredVersion: metadata.disease_family_version,
+      }),
+      diseaseFamilyVersion: DISEASE_FAMILY_VERSION,
       samples: Math.max(0, Math.trunc(finite(node.sample_count, 0))),
       platform: text(node.platform, payload.snapshot.stratum),
       organism: text(metadata.organism, "Unknown / not reviewed"),

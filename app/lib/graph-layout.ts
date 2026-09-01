@@ -6,6 +6,18 @@ export type LayoutPoint = { x: number; y: number };
 
 type Rect = { x: number; y: number; width: number; height: number };
 
+export function graphGroupIdentity(node: GraphNode, mode: GraphLayoutMode) {
+  if (mode === "topology") {
+    const value = node.community || "Unassigned";
+    return {
+      id: `topology:${value}`,
+      label: value.replace(/^community-0*/, "Cluster "),
+    };
+  }
+  const label = mode === "tissue" ? nodeTissueSystem(node) : node.diseaseFamily;
+  return { id: `${mode}:${label.trim() || "Unknown"}`, label: label.trim() || "Unknown" };
+}
+
 export type LayoutGroup = {
   id: string;
   label: string;
@@ -502,6 +514,37 @@ function topologyLayout(nodes: GraphNode[]): GraphLayout {
 
 export function computeGraphLayout(nodes: GraphNode[], mode: GraphLayoutMode): GraphLayout {
   return mode === "topology" ? topologyLayout(nodes) : groupedLayout(nodes, mode);
+}
+
+/** Recenter a focused topology subset while preserving its internal geometry. */
+export function fitGraphLayout(layout: GraphLayout, padding = 0.08): GraphLayout {
+  const points = [...layout.positions.values()];
+  if (!points.length) return layout;
+  const minX = Math.min(...points.map(({ x }) => x));
+  const maxX = Math.max(...points.map(({ x }) => x));
+  const minY = Math.min(...points.map(({ y }) => y));
+  const maxY = Math.max(...points.map(({ y }) => y));
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
+  const extent = Math.max(maxX - minX, maxY - minY);
+  const scale = extent > 1e-9 ? (1 - padding * 2) / extent : 0;
+  const positions = new Map(
+    [...layout.positions].map(([id, point]) => [
+      id,
+      scale
+        ? { x: 0.5 + (point.x - centerX) * scale, y: 0.5 + (point.y - centerY) * scale }
+        : { x: 0.5, y: 0.5 },
+    ]),
+  );
+  const groups = layout.groups.map((group) => {
+    const bounds = boundsFor(group.nodeIds, positions);
+    return {
+      ...group,
+      bounds,
+      center: { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 },
+    };
+  });
+  return { positions, groups };
 }
 
 function edgeStrength(edge: GraphEdge, mode: EvidenceMode) {

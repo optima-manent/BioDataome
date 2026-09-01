@@ -192,6 +192,8 @@ class SignatureBank:
             raise ValueError("Need at least one signature to build a bank.")
         n = signatures[0].n_features
         alpha = signatures[0].alpha
+        if any(not np.isclose(signature.alpha, alpha) for signature in signatures[1:]):
+            raise ValueError("All signatures in a bank must use the same alpha.")
         cs = [s.P.shape[1] for s in signatures]
         self.offsets = np.concatenate([[0], np.cumsum(cs)]).astype(np.int64)
         self.P = np.concatenate([np.ascontiguousarray(s.P, dtype=np.float64) for s in signatures], axis=1)
@@ -219,6 +221,8 @@ def batched_null_cskl(sigP: PCASignature, bank: SignatureBank) -> np.ndarray:
     One matmul ``S = P^T Rcat`` then per-null segment sums over ``S^2``. Reproduces
     ``[cskl.cskl(sigP, R_b) for R_b in bank]`` to ~1e-11.
     """
+    if not np.isclose(sigP.alpha, bank.alpha):
+        raise ValueError("Query and bank signatures must use the same alpha.")
     alpha = float(sigP.alpha)
     n = float(sigP.n_features)
     lamP = np.asarray(sigP.lam, dtype=np.float64)
@@ -242,6 +246,8 @@ def batched_null_cskl_many(query: SignatureBank, bank: SignatureBank) -> np.ndar
     datasets" path used by the null-profile sweep: one big matmul shared across all
     query datasets at a given grid size.
     """
+    if not np.isclose(query.alpha, bank.alpha):
+        raise ValueError("Query and bank signatures must use the same alpha.")
     alpha = float(query.alpha)
     n = float(query.n_features)
 

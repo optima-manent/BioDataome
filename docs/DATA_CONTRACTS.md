@@ -347,6 +347,13 @@ curator-accepted. Generated assertions remain `unreviewed` until a curator
 accepts or rejects them. Each annotation artifact records the resolver version,
 decision status, canonical label, allowed namespaces, and OLS response hashes.
 
+The workbench's **clinical family** is a separate display facet. It places
+concordant disease labels into broad, versioned browsing groups and preserves an
+explicit unreviewed state when that evidence is not available. It does not
+assign an ICD code, replace the underlying disease assertion, or change the
+scientific graph. Node shapes are likewise a coarse anatomical display aid, not
+an ontology assertion.
+
 ### OpenRouter completion provenance
 
 Every structured completion records model, endpoint, response ID, prompt

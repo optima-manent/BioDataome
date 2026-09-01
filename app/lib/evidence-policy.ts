@@ -2,6 +2,11 @@ import type { GraphEdge, GraphNode } from "./graph-data";
 
 export type EvidenceLens = "all" | "agreement" | "cskl-only" | "cross-disease" | "overlap";
 
+export function formatProbability(value: number): string {
+  if (value === 0) return "0";
+  return value < 0.001 ? value.toExponential(2) : value.toFixed(3);
+}
+
 export function publishedOverlapClassification({
   classification,
   evidenceId,
@@ -53,6 +58,10 @@ export function isOverlapQualified(edge: GraphEdge): boolean {
     edge.discoveryExcluded === true ||
     (edge.overlapClassification !== undefined && edge.overlapClassification !== "none")
   );
+}
+
+export function usesDottedOverlapStyle(edge: GraphEdge): boolean {
+  return edge.overlapClassification === "major" || edge.overlapClassification === "exact";
 }
 
 export function edgeMatchesLens({

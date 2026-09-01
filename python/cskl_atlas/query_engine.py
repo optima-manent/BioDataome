@@ -101,15 +101,8 @@ class _Compiler:
                 (o.overlap_id IS NOT NULL AND o.discovery_excluded=0)
                 OR EXISTS (
                   SELECT 1 FROM calibrated_edges independent
-                  JOIN calibration_releases independent_release
-                    ON independent_release.calibration_id=independent.calibration_id
                   WHERE independent.pair_id=p.pair_id
-                    AND independent_release.stratum=(
-                      CASE WHEN s.stratum LIKE '%:global'
-                           THEN SUBSTR(s.stratum,1,LENGTH(s.stratum)-7)||':independent'
-                           ELSE s.stratum||':independent' END
-                    )
-                    AND independent_release.status IN ('calibrated','published')
+                    AND independent.calibration_id=s.independent_calibration_id
                 )
             )"""
             return independent if expected else f"(NOT {independent})"
@@ -268,16 +261,10 @@ def execute_query(
                    WHERE snapshot_id=?""",
                 (snapshot_id,),
             ).fetchone()
-            base = snapshot["stratum"][:-7] if snapshot["stratum"].endswith(":global") else snapshot["stratum"]
-            independent_available = connection.execute(
-                """SELECT 1 FROM calibration_releases
-                   WHERE stratum=? AND status IN ('calibrated','published') LIMIT 1""",
-                (f"{base}:independent",),
-            ).fetchone()
-            if overlap_count != edge_count and not independent_available:
+            if overlap_count != edge_count and not snapshot["independent_calibration_id"]:
                 raise UnsupportedQueryError(
                     "Independence cannot be inferred: this snapshot has neither complete "
-                    "overlap bindings nor a finalized independent calibration family."
+                    "overlap bindings nor a bound independent calibration family."
                 )
         parameters = [snapshot["text_release_id"], snapshot["calibration_id"]]
         parameters.extend(compiled["parameters"])
@@ -358,6 +345,7 @@ def execute_query(
         "edges": [dict(row) for row in rows],
         "provenance": {
             "calibration_id": snapshot["calibration_id"],
+            "independent_calibration_id": snapshot["independent_calibration_id"],
             "text_release_id": snapshot["text_release_id"],
             "policy_hash": snapshot["policy_hash"],
             "annotation_policy": "accepted_or_exact_ols_resolved_candidate",

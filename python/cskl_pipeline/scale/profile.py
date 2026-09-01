@@ -54,6 +54,11 @@ def compute_profiles(
     """
     if B is None:
         B = pool.B
+    elif int(B) != pool.B:
+        raise ValueError(
+            "A profile bootstrap override must match the frozen pool B; "
+            "build a new pool version to change it."
+        )
     dataset_ids = [d for d in dataset_ids if store.signature_path(d).exists()]
     if not dataset_ids:
         return 0
@@ -65,7 +70,17 @@ def compute_profiles(
     # chunk sweeps the whole grid (banks are regenerated per chunk, but a bank is
     # only ~50 s and chunks are few).
     for chunk in _chunk_by_cols(store, dataset_ids, max_query_cols):
-        sigs = [store_mod.load_signature(store.signature_path(g)) for g in chunk]
+        sigs = []
+        signature_hashes = []
+        for gse in chunk:
+            signature_path = store.signature_path(gse)
+            hash_before = store_mod.sha256_file(signature_path)
+            signature = store_mod.load_signature(signature_path)
+            hash_after = store_mod.sha256_file(signature_path)
+            if hash_before != hash_after:
+                raise RuntimeError(f"Signature changed while computing a profile for {gse!r}.")
+            sigs.append(signature)
+            signature_hashes.append(hash_after)
         query = SignatureBank(sigs)
         n = len(chunk)
         mu = np.zeros((n, grid.shape[0]), dtype=np.float64)
@@ -86,7 +101,9 @@ def compute_profiles(
                 store.null_profile_path(gse, pool.pool_version),
                 grid=grid, mu=mu[di], sigma=sigma[di],
                 pool_version=pool.pool_version, pool_hash=pool.pool_hash,
-                feature_hash=pool.feature_hash, mode=("exact" if pool.meta.get("exact_size") else "grid"),
+                feature_hash=pool.feature_hash, signature_hash=signature_hashes[di],
+                alpha=pool.alpha,
+                mode=("exact" if pool.meta.get("exact_size") else "grid"),
                 B=B,
             )
             written += 1

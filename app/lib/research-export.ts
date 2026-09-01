@@ -6,6 +6,7 @@ import type {
   GraphNode,
   Tissue,
 } from "./graph-data";
+import type { DiscoveryQuery } from "./discovery-query";
 
 export type ResearchExportView = {
   evidenceMode: "cskl" | "specter2" | "agreement";
@@ -14,6 +15,10 @@ export type ResearchExportView = {
   search: string;
   activeTissueSystems: Tissue[];
   minSamples: number;
+  maxQValue?: number;
+  nodeColorMode?: "tissue" | "disease";
+  focusedCluster?: string;
+  discoveryQuery?: DiscoveryQuery | null;
 };
 
 export type ResearchExportInput = {
@@ -75,6 +80,31 @@ function optionalFinite(value: number | undefined, field: string) {
   return value === undefined ? undefined : requireFinite(value, field);
 }
 
+function normalizeDiscoveryQuery(query: DiscoveryQuery) {
+  return {
+    independence: query.independence,
+    qMax: query.qMax === null ? null : requireFinite(query.qMax, "view.discoveryQuery.qMax"),
+    csklPercentileMin:
+      query.csklPercentileMin === null
+        ? null
+        : requireFinite(
+            query.csklPercentileMin,
+            "view.discoveryQuery.csklPercentileMin",
+          ),
+    tissueRelation: query.tissueRelation,
+    diseaseRelation: query.diseaseRelation,
+    specter2Operator: query.specter2Operator,
+    specter2Percentile:
+      query.specter2Percentile === null
+        ? null
+        : requireFinite(
+            query.specter2Percentile,
+            "view.discoveryQuery.specter2Percentile",
+          ),
+    mechanismTerm: query.mechanismTerm,
+  };
+}
+
 function normalizeNode(node: GraphNode) {
   return {
     id: node.id,
@@ -87,6 +117,7 @@ function normalizeNode(node: GraphNode) {
     disease: node.disease,
     ...optional("diseaseLabelSource", node.diseaseLabelSource),
     diseaseFamily: node.diseaseFamily,
+    ...optional("diseaseFamilyVersion", node.diseaseFamilyVersion),
     samples: requireFinite(node.samples, `${node.id}.samples`),
     platform: node.platform,
     organism: node.organism,
@@ -284,11 +315,25 @@ export function buildResearchExport(input: ResearchExportInput) {
     view: {
       evidenceMode: input.view.evidenceMode,
       clusterMode: input.view.clusterMode,
+      ...optional("nodeColorMode", input.view.nodeColorMode),
+      ...optional("focusedCluster", input.view.focusedCluster),
+      ...optional(
+        "discoveryQuery",
+        input.view.discoveryQuery
+          ? normalizeDiscoveryQuery(input.view.discoveryQuery)
+          : undefined,
+      ),
       lens: input.view.lens,
       filters: {
         search: input.view.search,
         activeTissueSystems: [...input.view.activeTissueSystems].sort(compareText),
         minSamples: requireFinite(input.view.minSamples, "view.minSamples"),
+        ...optional(
+          "maxQValue",
+          input.view.maxQValue === undefined
+            ? undefined
+            : requireFinite(input.view.maxQValue, "view.maxQValue"),
+        ),
       },
     },
     scope: {
@@ -332,10 +377,14 @@ const csvColumns = [
   "platform",
   "evidence_mode",
   "cluster_mode",
+  "node_color_mode",
+  "focused_cluster",
   "lens",
   "filter_search",
   "filter_active_tissue_systems",
   "filter_min_samples",
+  "filter_max_q_value",
+  "filter_discovery_query_json",
   "node_id",
   "dataset_uid",
   "version_id",
@@ -346,6 +395,7 @@ const csvColumns = [
   "disease",
   "disease_label_source",
   "disease_family",
+  "disease_family_version",
   "samples",
   "node_platform",
   "organism",
@@ -420,10 +470,16 @@ function provenanceColumns(researchExport: ResearchExport): CsvRow {
     platform: researchExport.provenance.platform,
     evidence_mode: researchExport.view.evidenceMode,
     cluster_mode: researchExport.view.clusterMode,
+    node_color_mode: researchExport.view.nodeColorMode,
+    focused_cluster: researchExport.view.focusedCluster,
     lens: researchExport.view.lens,
     filter_search: researchExport.view.filters.search,
     filter_active_tissue_systems: JSON.stringify(researchExport.view.filters.activeTissueSystems),
     filter_min_samples: researchExport.view.filters.minSamples,
+    filter_max_q_value: researchExport.view.filters.maxQValue,
+    filter_discovery_query_json: researchExport.view.discoveryQuery
+      ? JSON.stringify(researchExport.view.discoveryQuery)
+      : undefined,
   };
 }
 
@@ -445,6 +501,7 @@ export function serializeResearchExportCsv(researchExport: ResearchExport) {
       disease: node.disease,
       disease_label_source: node.diseaseLabelSource,
       disease_family: node.diseaseFamily,
+      disease_family_version: node.diseaseFamilyVersion,
       samples: node.samples,
       node_platform: node.platform,
       organism: node.organism,

@@ -21,12 +21,24 @@
     <meta property="og:type" content="website" />
     <title>C-SKL Atlas · Biological Dataset Discovery</title>
     <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/src/showcase.css" />
   </head>
   <body>
     <div id="root">
-      <main class="showcase-loading" aria-live="polite">
+      <main class="showcase-loading" aria-live="polite" aria-busy="true">
+        <div class="showcase-primer" aria-hidden="true">
+          <span class="showcase-cluster-label showcase-cluster-a">Blood studies</span>
+          <span class="showcase-cluster-label showcase-cluster-b">Neural studies</span>
+          <span class="showcase-link showcase-link-a"></span>
+          <span class="showcase-link showcase-link-b"></span>
+          <span class="showcase-dot showcase-dot-a"></span>
+          <span class="showcase-dot showcase-dot-b"></span>
+          <span class="showcase-dot showcase-dot-c"></span>
+          <span class="showcase-dot showcase-dot-d"></span>
+        </div>
         <strong>C-SKL Atlas</strong>
-        <span>Loading the frozen 500-study release…</span>
+        <span>Preparing the published 500-study map…</span>
+        <small>Color shows a grouping. Shape shows anatomical context. Lines are evidence links.</small>
       </main>
     </div>
     <noscript>This interactive graph requires JavaScript.</noscript>

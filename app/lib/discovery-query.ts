@@ -93,7 +93,7 @@ export function edgeMatchesDiscoveryQuery({
   if (
     query.tissueRelation !== "any" &&
     [source, target].some(
-      (node) => node.tissueSystemSource === "unvalidated_or_missing",
+      (node) => node.tissueSystemSource !== "ontology_label_concordant",
     )
   ) {
     return false;
@@ -101,7 +101,7 @@ export function edgeMatchesDiscoveryQuery({
   if (
     query.diseaseRelation !== "any" &&
     [source, target].some(
-      (node) => node.diseaseLabelSource === "unvalidated_or_missing",
+      (node) => node.diseaseLabelSource !== "ontology_label_concordant",
     )
   ) {
     return false;

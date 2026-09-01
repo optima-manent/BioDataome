@@ -5,9 +5,11 @@ import {
   buildAiEvidencePacket,
   computedSpecter2,
   edgeMatchesLens,
+  formatProbability,
   hasComputedSpecter2,
   isOverlapQualified,
   publishedOverlapClassification,
+  usesDottedOverlapStyle,
 } from "../app/lib/evidence-policy.ts";
 import {
   buildResearchExport,
@@ -15,7 +17,13 @@ import {
   serializeResearchExportCsv,
   serializeResearchExportJson,
 } from "../app/lib/research-export.ts";
-import { tissueColor } from "../app/lib/graph-data.ts";
+import {
+  DISEASE_FAMILY_VERSION,
+  deriveDiseaseFamily,
+  diseaseFamilyColor,
+  tissueColor,
+  tissueShape,
+} from "../app/lib/graph-data.ts";
 import {
   EMPTY_DISCOVERY_QUERY,
   discoveryQueryAst,
@@ -24,6 +32,7 @@ import {
 } from "../app/lib/discovery-query.ts";
 import {
   computeGraphLayout,
+  fitGraphLayout,
   placeGroupLabels,
   selectRenderedEdges,
 } from "../app/lib/graph-layout.ts";
@@ -35,7 +44,7 @@ const node = (id, tissue = "Airway", disease = "Condition") => ({
   title: id,
   tissue,
   disease,
-  diseaseFamily: "Other",
+  diseaseFamily: "Other / unclassified",
   samples: 10,
   platform: "GPL570",
   organism: "Homo sapiens",
@@ -86,6 +95,8 @@ test("server-renders the C-SKL Atlas workbench", async () => {
   assert.match(html, /Discovery query/);
   assert.match(html, /Export/);
   assert.match(html, /Evidence inspector/);
+  assert.match(html, /One map, four visual cues/);
+  assert.match(html, /Preparing the published snapshot/);
   assert.match(html, /SPECTER2 is text proximity/);
   assert.match(html, /<canvas/i);
   assert.doesNotMatch(html, /placeholder preview|Your site is taking shape|react-loading-skeleton/i);
@@ -275,7 +286,10 @@ test("published graph adapter retains reviewable annotation provenance", () => {
           annotation_state: "review_required",
           tissue_system: "Blood & immune",
           tissue_system_source: "unvalidated_or_missing",
-          disease_label_source: "unvalidated_or_missing",
+          disease: "lung adenocarcinoma",
+          disease_label_source: "ontology_label_concordant",
+          disease_family: "Other / unclassified",
+          disease_family_version: "legacy-v1",
           annotation_candidates: {
             tissue: [
               {
@@ -297,7 +311,9 @@ test("published graph adapter retains reviewable annotation provenance", () => {
   assert.equal(graph.nodes[0].annotationState, "review_required");
   assert.equal(graph.nodes[0].tissueSystem, "Blood & immune");
   assert.equal(graph.nodes[0].tissueSystemSource, "unvalidated_or_missing");
-  assert.equal(graph.nodes[0].diseaseLabelSource, "unvalidated_or_missing");
+  assert.equal(graph.nodes[0].diseaseLabelSource, "ontology_label_concordant");
+  assert.equal(graph.nodes[0].diseaseFamily, "Neoplastic");
+  assert.equal(graph.nodes[0].diseaseFamilyVersion, DISEASE_FAMILY_VERSION);
   assert.equal(graph.nodes[0].annotationCandidates.tissue[0].label, "blood");
   assert.equal(
     graph.nodes[0].annotationCandidates.tissue[0].ontologyId,
@@ -329,6 +345,19 @@ test("overlap qualification follows published classification rather than a displ
   );
 });
 
+test("edge notation reserves dotted lines for substantial published overlap", () => {
+  assert.equal(usesDottedOverlapStyle({ ...edge("illustrative"), overlapClassification: "exact" }), true);
+  assert.equal(usesDottedOverlapStyle({ ...edge("illustrative"), overlapClassification: "major" }), true);
+  assert.equal(usesDottedOverlapStyle({ ...edge("illustrative"), overlapClassification: "minor" }), false);
+  assert.equal(usesDottedOverlapStyle({ ...edge("illustrative"), overlapClassification: "unknown" }), false);
+});
+
+test("small probabilities remain legible instead of rounding to zero", () => {
+  assert.equal(formatProbability(0), "0");
+  assert.equal(formatProbability(4.2e-7), "4.20e-7");
+  assert.equal(formatProbability(0.0499), "0.050");
+});
+
 test("published edges without overlap evidence remain independent", () => {
   assert.equal(
     publishedOverlapClassification({
@@ -355,10 +384,57 @@ test("unbounded tissue labels receive stable visible colors", () => {
   assert.notEqual(tissueColor("brain"), tissueColor("kidney"));
 });
 
+test("clinical display families preserve uncertainty and do not invent codes", () => {
+  assert.equal(
+    deriveDiseaseFamily("lung adenocarcinoma", {
+      labelSource: "ontology_label_concordant",
+      declaredFamily: "Oncology",
+    }),
+    "Neoplastic",
+  );
+  assert.equal(
+    deriveDiseaseFamily("COPD", { labelSource: "ontology_label_concordant" }),
+    "Respiratory",
+  );
+  assert.equal(
+    deriveDiseaseFamily("lung cancer", {
+      labelSource: "unvalidated_or_missing",
+      declaredFamily: "Oncology",
+    }),
+    "Unreviewed",
+  );
+  assert.equal(
+    deriveDiseaseFamily("asthma; obesity", { labelSource: "ontology_label_concordant" }),
+    "Mixed disease families",
+  );
+  assert.equal(
+    deriveDiseaseFamily("lung cancer; healthy control", {
+      labelSource: "ontology_label_concordant",
+    }),
+    "Neoplastic",
+  );
+  assert.equal(DISEASE_FAMILY_VERSION, "atlas-clinical-family-v2");
+  assert.match(diseaseFamilyColor("Unreviewed"), /^#/);
+});
+
+test("tissue shapes are coarse, stable anatomical cues", () => {
+  assert.equal(tissueShape("Blood & immune"), "circle");
+  assert.equal(tissueShape("Respiratory"), "triangle");
+  assert.equal(tissueShape("Nervous system"), "diamond");
+  assert.equal(tissueShape("Digestive & hepatobiliary"), "hexagon");
+  assert.equal(tissueShape("Cell culture / in vitro"), "cross");
+});
+
 test("automatic grouped layouts give every dataset a distinct bounded position", () => {
   const nodes = Array.from({ length: 500 }, (_, index) => ({
     ...node(`GSE${String(index).padStart(6, "0")}`, `Tissue ${index % 173}`),
-    diseaseFamily: ["Oncology", "Exposure", "Metabolic", "Reference", "Other"][index % 5],
+    diseaseFamily: [
+      "Neoplastic",
+      "Injury & exposure",
+      "Endocrine & metabolic",
+      "Reference / no disease",
+      "Other / unclassified",
+    ][index % 5],
     community: `community-${String(index % 39).padStart(4, "0")}`,
   }));
   for (const mode of ["tissue", "disease"]) {
@@ -370,6 +446,23 @@ test("automatic grouped layouts give every dataset a distinct bounded position",
       assert.ok(Number.isFinite(point.y) && point.y > 0 && point.y < 1);
     }
   }
+});
+
+test("focused topology layouts expand a small cluster while preserving its geometry", () => {
+  const nodes = [
+    { ...node("A"), x: 0.11, y: 0.2, community: "community-0009" },
+    { ...node("B"), x: 0.12, y: 0.21, community: "community-0009" },
+    { ...node("C"), x: 0.14, y: 0.22, community: "community-0009" },
+  ];
+  const fitted = fitGraphLayout(computeGraphLayout(nodes, "topology"));
+  const points = [...fitted.positions.values()];
+  const width = Math.max(...points.map(({ x }) => x)) - Math.min(...points.map(({ x }) => x));
+  const height = Math.max(...points.map(({ y }) => y)) - Math.min(...points.map(({ y }) => y));
+  assert.ok(Math.max(width, height) >= 0.8);
+  assert.deepEqual(
+    fitGraphLayout(computeGraphLayout([{ ...node("ONLY"), community: "community-0001" }], "topology")).positions.get("ONLY"),
+    { x: 0.5, y: 0.5 },
+  );
 });
 
 test("group labels stay clamped, prioritized, and collision-free in screen space", () => {
@@ -401,8 +494,16 @@ test("group labels stay clamped, prioritized, and collision-free in screen space
 });
 
 test("static discovery queries apply reproducible AND semantics", () => {
-  const source = node("A", "Blood", "Condition A");
-  const target = node("B", "Blood", "Condition B");
+  const source = {
+    ...node("A", "Blood", "Condition A"),
+    tissueSystemSource: "ontology_label_concordant",
+    diseaseLabelSource: "ontology_label_concordant",
+  };
+  const target = {
+    ...node("B", "Blood", "Condition B"),
+    tissueSystemSource: "ontology_label_concordant",
+    diseaseLabelSource: "ontology_label_concordant",
+  };
   const relationship = {
     ...edge("computed", 0.93),
     csklPercentile: 0.98,
@@ -431,6 +532,15 @@ test("static discovery queries apply reproducible AND semantics", () => {
     edgeMatchesDiscoveryQuery({
       edge: relationship,
       source: { ...source, diseaseLabelSource: "unvalidated_or_missing" },
+      target,
+      query,
+    }),
+    false,
+  );
+  assert.equal(
+    edgeMatchesDiscoveryQuery({
+      edge: relationship,
+      source: { ...source, diseaseLabelSource: undefined },
       target,
       query,
     }),
@@ -582,12 +692,14 @@ test("research exports are deterministic, selection-induced, and provenance-boun
       search: "=WEBSERVICE(\"https://example.invalid\")",
       activeTissueSystems: ["Liver", "Airway"],
       minSamples: 2,
+      discoveryQuery: { ...EMPTY_DISCOVERY_QUERY, qMax: 0.05 },
     },
   };
 
   const researchExport = buildResearchExport(input);
   assert.equal(researchExport.provenance.snapshotId, "snapshot-42");
   assert.equal(researchExport.scope.type, "manual-selection");
+  assert.equal(researchExport.view.discoveryQuery.qMax, 0.05);
   assert.deepEqual(researchExport.scope.selectedNodeIds, ["A", "B"]);
   assert.deepEqual(researchExport.nodes.map(({ id }) => id), ["A", "B"]);
   assert.equal(researchExport.nodes[0].tissueSystemSource, "ontology_label_concordant");
@@ -619,6 +731,7 @@ test("research exports are deterministic, selection-induced, and provenance-boun
   assert.match(csv, /"molecular_cskl"/);
   assert.match(csv, /"tissue_system_source"/);
   assert.match(csv, /"disease_label_source"/);
+  assert.match(csv, /"filter_discovery_query_json"/);
   assert.match(csv, /"annotation_candidates_json"/);
   assert.match(csv, /"overlap_fraction"/);
   assert.match(csv, /"text_provenance"/);

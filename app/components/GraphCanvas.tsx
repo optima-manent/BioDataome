@@ -8,34 +8,48 @@ import {
   useState,
 } from "react";
 import {
-  diseaseShapeLabel,
+  diseaseFamilyColor,
+  nodeColor,
   nodeTissueSystem,
   tissueColor,
+  tissueShape,
+  type DiseaseFamily,
   type GraphEdge,
   type GraphNode,
+  type NodeColorMode,
+  type TissueShape,
 } from "../lib/graph-data";
 import {
   computedSpecter2,
-  isOverlapQualified,
+  usesDottedOverlapStyle,
 } from "../lib/evidence-policy";
 import {
   computeGraphLayout,
+  fitGraphLayout,
   placeGroupLabels,
   selectRenderedEdges,
 } from "../lib/graph-layout";
 
 export type GraphMode = "cskl" | "specter2" | "agreement";
 export type ClusterMode = "topology" | "tissue" | "disease";
+export type GraphGroupSelection = {
+  id: string;
+  label: string;
+};
 
 type Props = {
   nodes: GraphNode[];
   edges: GraphEdge[];
   mode: GraphMode;
   clusterMode: ClusterMode;
+  nodeColorMode: NodeColorMode;
+  focusedGroupId?: string;
+  topOverlayInset?: number;
   selectedNodeIds: Set<string>;
   selectedEdgeId: string | null;
   onSelectNode: (id: string, additive: boolean) => void;
   onSelectEdge: (id: string) => void;
+  onFocusGroup: (group: GraphGroupSelection) => void;
   onClear: () => void;
 };
 
@@ -48,13 +62,12 @@ type Hover =
 
 function drawNodeShape(
   context: CanvasRenderingContext2D,
-  node: GraphNode,
+  shape: TissueShape,
   x: number,
   y: number,
   radius: number,
 ) {
   context.beginPath();
-  const shape = diseaseShapeLabel[node.diseaseFamily];
   if (shape === "circle") {
     context.arc(x, y, radius, 0, Math.PI * 2);
     return;
@@ -76,6 +89,23 @@ function drawNodeShape(
   }
   if (shape === "square") {
     context.rect(x - radius * 0.86, y - radius * 0.86, radius * 1.72, radius * 1.72);
+    return;
+  }
+  if (shape === "cross") {
+    const inner = radius * 0.38;
+    context.moveTo(x - inner, y - radius);
+    context.lineTo(x + inner, y - radius);
+    context.lineTo(x + inner, y - inner);
+    context.lineTo(x + radius, y - inner);
+    context.lineTo(x + radius, y + inner);
+    context.lineTo(x + inner, y + inner);
+    context.lineTo(x + inner, y + radius);
+    context.lineTo(x - inner, y + radius);
+    context.lineTo(x - inner, y + inner);
+    context.lineTo(x - radius, y + inner);
+    context.lineTo(x - radius, y - inner);
+    context.lineTo(x - inner, y - inner);
+    context.closePath();
     return;
   }
   for (let index = 0; index < 6; index += 1) {
@@ -106,28 +136,19 @@ function nodeRadius(node: GraphNode, zoom: number, nodeCount: number, viewport: 
   return base * densityScale * Math.min(Math.sqrt(zoom), 2.4);
 }
 
-function truncateCanvasLabel(
-  context: CanvasRenderingContext2D,
-  value: string,
-  maximumWidth: number,
-) {
-  if (context.measureText(value).width <= maximumWidth) return value;
-  let end = value.length;
-  while (end > 1 && context.measureText(`${value.slice(0, end)}…`).width > maximumWidth) {
-    end -= 1;
-  }
-  return `${value.slice(0, Math.max(1, end)).trimEnd()}…`;
-}
-
 export function GraphCanvas({
   nodes,
   edges,
   mode,
   clusterMode,
+  nodeColorMode,
+  focusedGroupId,
+  topOverlayInset = 66,
   selectedNodeIds,
   selectedEdgeId,
   onSelectNode,
   onSelectEdge,
+  onFocusGroup,
   onClear,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -156,8 +177,17 @@ export function GraphCanvas({
     return { min: Math.min(...values), max: Math.max(...values) };
   }, [edges]);
 
-  const layout = useMemo(() => computeGraphLayout(nodes, clusterMode), [nodes, clusterMode]);
+  const layout = useMemo(() => {
+    const computed = computeGraphLayout(nodes, clusterMode);
+    return focusedGroupId && clusterMode === "topology"
+      ? fitGraphLayout(computed)
+      : computed;
+  }, [clusterMode, focusedGroupId, nodes]);
   const positions = layout.positions;
+  const groupById = useMemo(
+    () => new Map(layout.groups.map((group) => [group.id, group])),
+    [layout.groups],
+  );
   const renderedEdges = useMemo(
     () =>
       selectRenderedEdges({
@@ -223,6 +253,46 @@ export function GraphCanvas({
     [nodes, positions, renderedEdges, viewport, worldToScreen, zoom],
   );
 
+  const groupLabels = useMemo(() => {
+    const topologyMinimum = zoom < 1.2 ? 6 : zoom < 2.1 ? 2 : 1;
+    const candidates = layout.groups
+      .filter((group) => clusterMode !== "topology" || group.nodeIds.length >= topologyMinimum)
+      .map((group) => {
+        const topLeft = worldToScreen({ x: group.bounds.x, y: group.bounds.y });
+        const bottomRight = worldToScreen({
+          x: group.bounds.x + group.bounds.width,
+          y: group.bounds.y + group.bounds.height,
+        });
+        return {
+          id: group.id,
+          label: group.label,
+          nodeCount: group.nodeIds.length,
+          priority: group.id === focusedGroupId ? 10_000 : 0,
+          bounds: {
+            x: Math.min(topLeft.x, bottomRight.x),
+            y: Math.min(topLeft.y, bottomRight.y),
+            width: Math.abs(bottomRight.x - topLeft.x),
+            height: Math.abs(bottomRight.y - topLeft.y),
+          },
+        };
+      });
+    return placeGroupLabels({
+      candidates,
+      viewport,
+      topInset: topOverlayInset,
+      maximum: clusterMode === "topology" ? (zoom < 1.2 ? 10 : zoom < 2.1 ? 18 : 32) : 40,
+    });
+  }, [clusterMode, focusedGroupId, layout.groups, topOverlayInset, viewport, worldToScreen, zoom]);
+
+  const groupAccent = useCallback(
+    (label: string) => {
+      if (clusterMode === "tissue") return tissueColor(label);
+      if (clusterMode === "disease") return diseaseFamilyColor(label as DiseaseFamily);
+      return "#4ad6c3";
+    },
+    [clusterMode],
+  );
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -279,8 +349,9 @@ export function GraphCanvas({
         const height = bottomRight.y - topLeft.y;
         if (width < 2 || height < 2) continue;
         context.save();
-        context.fillStyle = clusterMode === "tissue" ? tissueColor(group.label) : "#91a9c4";
-        context.strokeStyle = clusterMode === "tissue" ? tissueColor(group.label) : "#aec2da";
+        const accent = groupAccent(group.label);
+        context.fillStyle = accent;
+        context.strokeStyle = accent;
         context.globalAlpha = 0.055;
         context.beginPath();
         context.roundRect(topLeft.x, topLeft.y, width, height, Math.min(10, width / 5, height / 5));
@@ -343,7 +414,7 @@ export function GraphCanvas({
         : overview
           ? 0.45 + strength * 1.2
           : 0.65 + strength * 2;
-      if (isOverlapQualified(item)) context.setLineDash([2, 7]);
+      if (usesDottedOverlapStyle(item)) context.setLineDash([2, 7]);
       context.beginPath();
       context.moveTo(a.x, a.y);
       context.lineTo(b.x, b.y);
@@ -369,7 +440,7 @@ export function GraphCanvas({
       const hovered = hover?.kind === "node" && hover.id === node.id;
       if (selected || hovered) {
         context.save();
-        context.shadowColor = tissueColor(nodeTissueSystem(node));
+        context.shadowColor = nodeColor(node, nodeColorMode);
         context.shadowBlur = selected ? 22 : 14;
         context.strokeStyle = selected ? "#fff3c4" : "#dbe9f7";
         context.lineWidth = selected ? 2.8 : 1.5;
@@ -379,8 +450,8 @@ export function GraphCanvas({
         context.restore();
       }
       context.save();
-      drawNodeShape(context, node, position.x, position.y, radius);
-      context.fillStyle = tissueColor(nodeTissueSystem(node));
+      drawNodeShape(context, tissueShape(nodeTissueSystem(node)), position.x, position.y, radius);
+      context.fillStyle = nodeColor(node, nodeColorMode);
       context.globalAlpha = 0.96;
       context.fill();
       context.strokeStyle = "rgba(255,255,255,.72)";
@@ -409,60 +480,15 @@ export function GraphCanvas({
       }
     }
 
-    const topologyMinimum = zoom < 1.2 ? 6 : zoom < 2.1 ? 2 : 1;
-    const labelCandidates = layout.groups
-      .filter((group) => clusterMode !== "topology" || group.nodeIds.length >= topologyMinimum)
-      .map((group) => {
-        const topLeft = worldToScreen({ x: group.bounds.x, y: group.bounds.y });
-        const bottomRight = worldToScreen({
-          x: group.bounds.x + group.bounds.width,
-          y: group.bounds.y + group.bounds.height,
-        });
-        const selected = group.nodeIds.some((id) => selectedNodeIds.has(id));
-        return {
-          id: group.id,
-          label: group.label,
-          nodeCount: group.nodeIds.length,
-          priority: selected ? 10_000 : 0,
-          bounds: {
-            x: Math.min(topLeft.x, bottomRight.x),
-            y: Math.min(topLeft.y, bottomRight.y),
-            width: Math.abs(bottomRight.x - topLeft.x),
-            height: Math.abs(bottomRight.y - topLeft.y),
-          },
-        };
-      });
-    const groupLabels = placeGroupLabels({
-      candidates: labelCandidates,
-      viewport,
-      maximum: clusterMode === "topology" ? (zoom < 1.2 ? 10 : zoom < 2.1 ? 18 : 32) : 40,
-    });
-    for (const label of groupLabels) {
-      const raw = `${label.label} · ${label.nodeCount}`;
-      context.save();
-      context.font = "650 13px Inter, Arial, sans-serif";
-      const display = truncateCanvasLabel(context, raw, label.width - 22);
-      context.fillStyle = "rgba(7, 17, 30, .93)";
-      context.strokeStyle = "rgba(192, 213, 235, .58)";
-      context.lineWidth = 1;
-      context.beginPath();
-      context.roundRect(label.x, label.y, label.width, label.height, 7);
-      context.fill();
-      context.stroke();
-      context.fillStyle =
-        clusterMode === "tissue" ? tissueColor(label.label) : clusterMode === "disease" ? "#f1b94d" : "#4ad6c3";
-      context.fillRect(label.x + 6, label.y + 6, 3, label.height - 12);
-      context.fillStyle = "#f0f6fc";
-      context.textAlign = "left";
-      context.textBaseline = "middle";
-      context.fillText(display, label.x + 14, label.y + label.height / 2);
-      context.restore();
-    }
-
     if (hover) {
       const label =
         hover.kind === "node"
-          ? `${hover.id} · ${nodeMap.get(hover.id)?.title ?? "Dataset"}`
+          ? (() => {
+              const node = nodeMap.get(hover.id);
+              return node
+                ? `${node.id} · ${node.diseaseFamily} · ${nodeTissueSystem(node)}`
+                : `${hover.id} · Dataset`;
+            })()
           : (() => {
               const item = edges.find((candidate) => candidate.id === hover.id);
               return item ? `${item.source} ↔ ${item.target}` : "Relationship";
@@ -488,10 +514,12 @@ export function GraphCanvas({
     csklExtent,
     clusterMode,
     edges,
+    groupAccent,
     hover,
     layout,
     mode,
     nodeMap,
+    nodeColorMode,
     nodes,
     pan,
     positions,
@@ -516,7 +544,7 @@ export function GraphCanvas({
         className="graph-canvas"
         role="img"
         tabIndex={0}
-        aria-label={`Interactive dataset graph with ${nodes.length} datasets and ${visibleEdges.length} visible relationships. Use the accessible dataset list to inspect individual studies.`}
+        aria-label={`Interactive dataset graph with ${nodes.length} datasets and ${visibleEdges.length} visible relationships. Use the cluster buttons or accessible dataset list to explore the map.`}
         onContextMenu={(event) => event.preventDefault()}
         onPointerDown={(event) => {
           const point = eventPoint(event);
@@ -564,6 +592,37 @@ export function GraphCanvas({
           setZoom(1);
         }}
       />
+      <div className="graph-group-labels" aria-label="Clusters in view">
+        {groupLabels.map((label) => {
+          const group = groupById.get(label.id);
+          if (!group) return null;
+          return (
+            <button
+              type="button"
+              key={label.id}
+              className={label.id === focusedGroupId ? "active" : ""}
+              aria-pressed={label.id === focusedGroupId}
+              aria-label={`Open ${label.label}, ${label.nodeCount} datasets`}
+              title={`Open ${label.label}`}
+              style={{
+                left: label.x,
+                top: label.y,
+                width: label.width,
+                height: label.height,
+              }}
+              onClick={() => onFocusGroup({
+                id: group.id,
+                label: group.label,
+              })}
+            >
+              <i style={{ background: groupAccent(label.label) }} />
+              <span>{label.label}</span>
+              <small>{label.nodeCount}</small>
+              <b aria-hidden="true">↗</b>
+            </button>
+          );
+        })}
+      </div>
       <div className="map-controls" aria-label="Graph zoom controls">
         <button type="button" aria-label="Zoom in" onClick={() => setZoom((value) => Math.min(value * 1.25, 8))}>
           +

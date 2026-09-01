@@ -12,7 +12,7 @@ from cskl_atlas.worker import (
     enqueue_incremental_score_job,
     run_one_job,
 )
-from cskl_pipeline.scale.store import save_null_profile, save_signature
+from cskl_pipeline.scale.store import atomic_save_npz, save_null_profile, save_signature
 
 
 def _file_hash(path) -> str:
@@ -108,6 +108,29 @@ def test_leased_incremental_worker_scores_only_delta_and_resumes_idempotently(tm
     assert not any({row["version_a"], row["version_b"]} == {old_a, old_b} for row in rows)
 
 
+def test_incremental_worker_heartbeats_keep_the_configured_lease(tmp_path, monkeypatch):
+    catalog = Catalog(tmp_path / "atlas.sqlite")
+    catalog.initialize()
+    _catalog_signature(catalog, tmp_path, "GSE1", 0)
+    new = _catalog_signature(catalog, tmp_path, "GSE2", 1)
+    enqueue_incremental_score_job(
+        catalog, new_version_ids=[new], algorithm_hash="cskl-core-v1"
+    )
+
+    original_heartbeat = catalog.heartbeat_job
+    heartbeat_leases: list[int] = []
+
+    def record_heartbeat(*args, **kwargs):
+        heartbeat_leases.append(kwargs["lease_seconds"])
+        return original_heartbeat(*args, **kwargs)
+
+    monkeypatch.setattr(catalog, "heartbeat_job", record_heartbeat)
+    result = run_one_job(catalog, worker_id="worker-a", lease_seconds=37)
+
+    assert result["status"] == "succeeded"
+    assert heartbeat_leases == [37]
+
+
 def test_worker_rejects_corrupted_signature_without_retry_loop(tmp_path):
     catalog = Catalog(tmp_path / "atlas.sqlite")
     catalog.initialize()
@@ -159,6 +182,8 @@ def test_calibration_worker_uses_versioned_profiles_and_finalizes_bh(tmp_path):
             pool_version="pool_v1",
             pool_hash=pool_hash,
             feature_hash="feature-v1",
+            signature_hash=_file_hash(Path(signature_uri)),
+            alpha=0.5,
             mode="exact",
             B=100,
         )
@@ -203,6 +228,67 @@ def test_calibration_worker_uses_versioned_profiles_and_finalizes_bh(tmp_path):
     assert all(row["cskl_similarity_percentile"] is not None for row in rows)
 
 
+def test_worker_rejects_obsolete_profile_schema_without_retry(tmp_path):
+    catalog = Catalog(tmp_path / "atlas.sqlite")
+    catalog.initialize()
+    version_a = _catalog_signature(catalog, tmp_path, "GSE1", 0)
+    version_b = _catalog_signature(catalog, tmp_path, "GSE2", 1)
+    algorithm_hash = "cskl-core-obsolete-profile"
+    catalog.record_pair_scores([(version_a, version_b, algorithm_hash, 1.0)])
+    pool_hash = "pool-obsolete-v1"
+    profile_kind = "null_profile:pool_obsolete"
+
+    for version_id in (version_a, version_b):
+        with catalog.reader() as connection:
+            signature_uri = connection.execute(
+                "SELECT uri FROM artifacts WHERE dataset_version_id=? AND kind='pca_signature'",
+                (version_id,),
+            ).fetchone()[0]
+        profile_path = Path(signature_uri).parent / "null_profile__pool_obsolete.npz"
+        atomic_save_npz(
+            profile_path,
+            grid=np.array([8]),
+            mu=np.array([2.0]),
+            sigma=np.array([1.0]),
+            pool_version=np.array("pool_obsolete"),
+            pool_hash=np.array(pool_hash),
+            feature_hash=np.array("feature-v1"),
+            alpha=np.float64(0.5),
+            mode=np.array("exact"),
+            B=np.int64(100),
+        )
+        catalog.record_artifact(
+            artifact_id=hashlib.sha256(f"{version_id}:{profile_kind}".encode()).hexdigest(),
+            kind=profile_kind,
+            uri=str(profile_path),
+            checksum=_file_hash(profile_path),
+            dependency_hash=hashlib.sha256(
+                f"profile:{version_id}:{pool_hash}".encode()
+            ).hexdigest(),
+            manifest={"pool_hash": pool_hash, "pool_version": "pool_obsolete"},
+            dataset_version_id=version_id,
+        )
+
+    calibration = catalog.stage_current_calibration(
+        stratum="GPL570:global",
+        mode="exact",
+        pool_hash=pool_hash,
+        parameter_hash="obsolete-profile-schema",
+        algorithm_hash=algorithm_hash,
+        manifest={"profile_kind": profile_kind},
+    )
+    job_id = enqueue_calibration_job(
+        catalog, calibration_id=calibration, profile_kind=profile_kind
+    )
+
+    result = run_one_job(catalog, worker_id="calibration-worker")
+
+    assert result["status"] == "dead"
+    assert "obsolete or malformed" in result["error"]
+    assert "recompute" in result["error"]
+    assert catalog.get_job(job_id)["error_code"] == "INVALID_JOB_INPUT"
+
+
 def test_worker_exact_rejects_boundary_clamp_and_frozen_reports_it(tmp_path):
     catalog = Catalog(tmp_path / "atlas.sqlite")
     catalog.initialize()
@@ -226,6 +312,8 @@ def test_worker_exact_rejects_boundary_clamp_and_frozen_reports_it(tmp_path):
             pool_version="pool_boundary",
             pool_hash=pool_hash,
             feature_hash="feature-v1",
+            signature_hash=_file_hash(Path(signature_uri)),
+            alpha=0.5,
             mode="exact",
             B=100,
         )

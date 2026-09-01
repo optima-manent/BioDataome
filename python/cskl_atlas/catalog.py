@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def utc_now() -> str:
@@ -67,6 +67,14 @@ def _sha256_path(path: Path) -> str:
         while chunk := handle.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _companion_independent_stratum(stratum: str) -> str:
+    if stratum.endswith(":independent"):
+        return stratum
+    if stratum.endswith(":global"):
+        return stratum[: -len(":global")] + ":independent"
+    return stratum + ":independent"
 
 
 class Catalog:
@@ -281,6 +289,7 @@ class Catalog:
                 CREATE TABLE IF NOT EXISTS graph_snapshots (
                     snapshot_id TEXT PRIMARY KEY,
                     calibration_id TEXT NOT NULL REFERENCES calibration_releases(calibration_id),
+                    independent_calibration_id TEXT REFERENCES calibration_releases(calibration_id),
                     stratum TEXT NOT NULL,
                     policy_hash TEXT NOT NULL,
                     layout_version TEXT NOT NULL,
@@ -431,13 +440,43 @@ class Catalog:
                 ("calibrated_edges", "cskl_similarity_percentile", "REAL"),
                 ("graph_snapshots", "manifest_checksum", "TEXT"),
                 ("graph_snapshots", "text_release_id", "TEXT REFERENCES text_releases(text_release_id)"),
+                (
+                    "graph_snapshots",
+                    "independent_calibration_id",
+                    "TEXT REFERENCES calibration_releases(calibration_id)",
+                ),
             )
+            added_columns: set[tuple[str, str]] = set()
             for table, column, declaration in migrations:
                 columns = {
                     row["name"] for row in connection.execute(f"PRAGMA table_info({table})")
                 }
                 if column not in columns:
                     connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+                    added_columns.add((table, column))
+            if (
+                ("graph_snapshots", "independent_calibration_id") in added_columns
+                or (stored_version is not None and stored_version < 5)
+            ):
+                legacy_snapshots = connection.execute(
+                    """SELECT snapshot_id,calibration_id,stratum,
+                              COALESCE(published_at,created_at) AS frozen_at
+                       FROM graph_snapshots
+                       WHERE independent_calibration_id IS NULL"""
+                ).fetchall()
+                for snapshot in legacy_snapshots:
+                    independent_calibration_id = self._resolve_independent_calibration(
+                        connection,
+                        calibration_id=str(snapshot["calibration_id"]),
+                        stratum=str(snapshot["stratum"]),
+                        finalized_before=str(snapshot["frozen_at"]),
+                    )
+                    if independent_calibration_id is not None:
+                        connection.execute(
+                            """UPDATE graph_snapshots SET independent_calibration_id=?
+                               WHERE snapshot_id=?""",
+                            (independent_calibration_id, snapshot["snapshot_id"]),
+                        )
             connection.execute(
                 "INSERT INTO catalog_meta(key, value) VALUES('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -1675,6 +1714,96 @@ class Catalog:
             connection.execute("DROP TABLE temp.text_percentiles")
         return count
 
+    @staticmethod
+    def _resolve_independent_calibration(
+        connection: sqlite3.Connection,
+        *,
+        calibration_id: str,
+        stratum: str,
+        requested_calibration_id: str | None = None,
+        finalized_before: str | None = None,
+    ) -> str | None:
+        if stratum.endswith(":independent"):
+            if (
+                requested_calibration_id is not None
+                and requested_calibration_id != calibration_id
+            ):
+                raise ValueError(
+                    "An independent-family snapshot must bind its primary calibration."
+                )
+            return calibration_id
+        primary = connection.execute(
+            """SELECT mode,pool_hash,algorithm_hash,
+                      json_extract(manifest_json,'$.run_id') AS run_id
+               FROM calibration_releases WHERE calibration_id=?""",
+            (calibration_id,),
+        ).fetchone()
+        if primary is None:
+            return None
+        if requested_calibration_id is not None:
+            requested = connection.execute(
+                """SELECT status,stratum,mode,pool_hash,algorithm_hash,
+                          json_extract(manifest_json,'$.run_id') AS run_id
+                   FROM calibration_releases WHERE calibration_id=?""",
+                (requested_calibration_id,),
+            ).fetchone()
+            if requested is None or requested["status"] not in {"calibrated", "published"}:
+                raise ValueError("The requested independent calibration is not finalized.")
+            compatible = (
+                requested["stratum"] == _companion_independent_stratum(stratum)
+                and requested["mode"] == primary["mode"]
+                and requested["pool_hash"] == primary["pool_hash"]
+                and (requested["algorithm_hash"] or "") == (primary["algorithm_hash"] or "")
+                and (
+                    primary["run_id"] is None
+                    or requested["run_id"] == primary["run_id"]
+                )
+            )
+            if not compatible:
+                raise ValueError(
+                    "The requested independent calibration is incompatible with the primary release."
+                )
+            return requested_calibration_id
+        if primary["run_id"] is None and finalized_before is None:
+            return None
+        cutoff_clause = ""
+        parameters: list[Any] = [
+            _companion_independent_stratum(stratum),
+            primary["mode"],
+            primary["pool_hash"],
+            primary["algorithm_hash"],
+        ]
+        if finalized_before is not None:
+            cutoff_clause = (
+                "AND candidate.created_at<=? "
+                "AND COALESCE(candidate.finalized_at,candidate.created_at)<=?"
+            )
+            parameters.extend([finalized_before, finalized_before])
+        run_clause = ""
+        if primary["run_id"] is not None:
+            run_clause = "AND json_extract(candidate.manifest_json,'$.run_id')=?"
+            parameters.append(primary["run_id"])
+        statuses = (
+            "'calibrated','published','superseded'"
+            if finalized_before
+            else "'calibrated','published'"
+        )
+        candidate = connection.execute(
+            f"""SELECT candidate.calibration_id
+                FROM calibration_releases candidate
+                WHERE candidate.stratum=?
+                  AND candidate.status IN ({statuses})
+                  AND candidate.mode=?
+                  AND candidate.pool_hash=?
+                  AND COALESCE(candidate.algorithm_hash,'')=COALESCE(?,'')
+                  {cutoff_clause}
+                  {run_clause}
+                ORDER BY candidate.created_at DESC,candidate.calibration_id DESC
+                LIMIT 1""",
+            parameters,
+        ).fetchone()
+        return str(candidate["calibration_id"]) if candidate is not None else None
+
     def stage_snapshot(
         self,
         *,
@@ -1687,10 +1816,16 @@ class Catalog:
         datasets: Iterable[tuple[str, float | None, float | None, str | None]],
         text_release_id: str | None = None,
         pair_ids: Iterable[str] | None = None,
+        independent_calibration_id: str | None = None,
     ) -> str:
         manifest_checksum = _validated_sha256(manifest_checksum, field="manifest_checksum")
         if not stratum.strip() or not policy_hash.strip() or not layout_version.strip() or not manifest_uri.strip():
             raise ValueError("snapshot stratum, policy, layout version, and manifest URI are required")
+        if independent_calibration_id is not None:
+            independent_calibration_id = str(independent_calibration_id).strip()
+            if not independent_calibration_id:
+                raise ValueError("independent_calibration_id must be non-empty when supplied")
+        explicit_independent_calibration = independent_calibration_id is not None
         members = tuple(datasets)
         requested_pair_ids = None if pair_ids is None else tuple(sorted(set(pair_ids)))
         if requested_pair_ids is not None and any(not value for value in requested_pair_ids):
@@ -1703,7 +1838,7 @@ class Catalog:
                 raise ValueError("snapshot version IDs must be non-empty")
             if x is None or y is None or not math.isfinite(float(x)) or not math.isfinite(float(y)):
                 raise ValueError("snapshot coordinates must be finite numbers")
-        snapshot_id = stable_id(
+        legacy_snapshot_id = stable_id(
             "snapshot", calibration_id, stratum, policy_hash, layout_version, manifest_uri,
             manifest_checksum, text_release_id or "",
         )
@@ -1716,6 +1851,16 @@ class Catalog:
                 raise ValueError("A graph snapshot requires a finalized calibration.")
             if release["stratum"] != stratum:
                 raise ValueError("Snapshot and calibration strata must match.")
+            independent_calibration_id = self._resolve_independent_calibration(
+                connection,
+                calibration_id=calibration_id,
+                stratum=stratum,
+                requested_calibration_id=independent_calibration_id,
+            )
+            snapshot_id = stable_id(
+                "snapshot", calibration_id, stratum, policy_hash, layout_version, manifest_uri,
+                manifest_checksum, text_release_id or "", independent_calibration_id or "",
+            )
             if text_release_id is not None:
                 text_release = connection.execute(
                     "SELECT status FROM text_releases WHERE text_release_id=?", (text_release_id,)
@@ -1723,18 +1868,36 @@ class Catalog:
                 if not text_release or text_release["status"] != "finalized":
                     raise ValueError("A snapshot can bind only a finalized text release.")
             existing = connection.execute(
-                "SELECT status FROM graph_snapshots WHERE snapshot_id=?", (snapshot_id,)
+                """SELECT status,independent_calibration_id FROM graph_snapshots
+                   WHERE snapshot_id=?""",
+                (snapshot_id,),
             ).fetchone()
+            if existing is None:
+                legacy = connection.execute(
+                    """SELECT status,independent_calibration_id FROM graph_snapshots
+                       WHERE snapshot_id=?""",
+                    (legacy_snapshot_id,),
+                ).fetchone()
+                if legacy and (
+                    not explicit_independent_calibration
+                    or legacy["independent_calibration_id"] == independent_calibration_id
+                ):
+                    snapshot_id = legacy_snapshot_id
+                    existing = legacy
+                    independent_calibration_id = legacy["independent_calibration_id"]
             if existing and existing["status"] != "staging":
                 raise ValueError("A published graph snapshot is immutable.")
+            if existing:
+                independent_calibration_id = existing["independent_calibration_id"]
             connection.execute(
                 """INSERT INTO graph_snapshots(
-                       snapshot_id,calibration_id,stratum,policy_hash,layout_version,manifest_uri,
-                       manifest_checksum,text_release_id,status,created_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(snapshot_id) DO NOTHING""",
+                       snapshot_id,calibration_id,independent_calibration_id,stratum,policy_hash,
+                       layout_version,manifest_uri,manifest_checksum,text_release_id,status,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(snapshot_id) DO NOTHING""",
                 (
-                    snapshot_id, calibration_id, stratum, policy_hash, layout_version,
-                    manifest_uri, manifest_checksum, text_release_id, "staging", utc_now(),
+                    snapshot_id, calibration_id, independent_calibration_id, stratum, policy_hash,
+                    layout_version, manifest_uri, manifest_checksum, text_release_id, "staging",
+                    utc_now(),
                 ),
             )
             connection.execute(
@@ -1828,7 +1991,8 @@ class Catalog:
     ) -> dict[str, Any]:
         snapshot = connection.execute(
             """SELECT s.*,c.status AS calibration_status,c.stratum AS calibration_stratum,
-                      c.expected_pair_count,c.family_hash,c.algorithm_hash
+                      c.expected_pair_count,c.family_hash,c.algorithm_hash,
+                      c.pool_hash AS calibration_pool_hash,c.mode AS calibration_mode
                FROM graph_snapshots s JOIN calibration_releases c USING(calibration_id)
                WHERE s.snapshot_id=?""",
             (snapshot_id,),
@@ -1840,6 +2004,25 @@ class Catalog:
             errors.append("calibration is not finalized")
         if snapshot["calibration_stratum"] != snapshot["stratum"]:
             errors.append("calibration stratum differs from snapshot stratum")
+        if snapshot["independent_calibration_id"]:
+            independent = connection.execute(
+                """SELECT status,stratum,mode,pool_hash,algorithm_hash
+                   FROM calibration_releases WHERE calibration_id=?""",
+                (snapshot["independent_calibration_id"],),
+            ).fetchone()
+            if independent is None:
+                errors.append("bound independent calibration does not exist")
+            else:
+                if independent["status"] not in {"calibrated", "published", "superseded"}:
+                    errors.append("bound independent calibration is not finalized")
+                if independent["stratum"] != _companion_independent_stratum(snapshot["stratum"]):
+                    errors.append("bound independent calibration stratum is incompatible")
+                if (
+                    independent["mode"] != snapshot["calibration_mode"]
+                    or independent["pool_hash"] != snapshot["calibration_pool_hash"]
+                    or (independent["algorithm_hash"] or "") != (snapshot["algorithm_hash"] or "")
+                ):
+                    errors.append("bound independent calibration provenance is incompatible")
         try:
             _validated_sha256(snapshot["manifest_checksum"] or "", field="manifest_checksum")
         except ValueError as exc:
@@ -2083,8 +2266,9 @@ class Catalog:
             ):
                 raise ValueError(f"{field} must be an integer between 1 and {maximum}")
 
-        snapshot_columns = """snapshot_id,calibration_id,stratum,policy_hash,layout_version,
-                              manifest_checksum,text_release_id,status,created_at,published_at"""
+        snapshot_columns = """snapshot_id,calibration_id,independent_calibration_id,stratum,
+                              policy_hash,layout_version,manifest_checksum,text_release_id,status,
+                              created_at,published_at"""
 
         def bounded_section(count: int, rows: Sequence[sqlite3.Row]) -> dict[str, Any]:
             items = [dict(row) for row in rows]
@@ -2327,11 +2511,6 @@ class Catalog:
                 raise KeyError(snapshot_id)
             if snapshot["published_at"] is None:
                 raise ValueError("Only a published snapshot can be served.")
-            independent_stratum = (
-                snapshot["stratum"][:-7] + ":independent"
-                if snapshot["stratum"].endswith(":global")
-                else snapshot["stratum"]
-            )
             nodes = connection.execute(
                 """SELECT g.version_id,g.x,g.y,g.community,d.dataset_uid,d.accession,d.platform,d.cohort,
                           v.sample_count,v.metadata_json,v.feature_hash,v.config_hash
@@ -2347,11 +2526,8 @@ class Catalog:
                             c.p_value,c.q_value,c.cskl_similarity_percentile,
                             (SELECT independent.q_value
                              FROM calibrated_edges independent
-                             JOIN calibration_releases release
-                               ON release.calibration_id=independent.calibration_id
-                             WHERE independent.pair_id=p.pair_id AND release.stratum=?
-                               AND release.status IN ('calibrated','published')
-                             ORDER BY release.created_at DESC LIMIT 1) AS independent_q_value,
+                             WHERE independent.pair_id=p.pair_id
+                               AND independent.calibration_id=?) AS independent_q_value,
                             o.shared_count,o.fraction_a,o.fraction_b,o.jaccard,o.overlap_coefficient,
                             o.classification,o.discovery_excluded,se.overlap_id,
                             t.cosine_similarity AS specter2_cosine,
@@ -2371,7 +2547,8 @@ class Catalog:
                      WHERE se.snapshot_id=? AND c.q_value<=? {independence_clause}
                      ORDER BY c.q_value ASC,p.cskl ASC LIMIT ?""",
                 (
-                    independent_stratum, snapshot["text_release_id"], snapshot["calibration_id"],
+                    snapshot["independent_calibration_id"], snapshot["text_release_id"],
+                    snapshot["calibration_id"],
                     snapshot["text_release_id"], snapshot_id, snapshot_id, snapshot_id,
                     q_max, edge_limit,
                 ),
